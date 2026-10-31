@@ -1,0 +1,4795 @@
+<!doctype html>
+<!--
+  BLIND RANKING & CHALLENGE  |  single-file edition
+  Version 0.3.0  |  Camera integration: live preview on the Play screen.
+                    Face tracking and video recording are NOT implemented yet.
+
+  PURPOSE
+    Offline-first Blind Ranking app (10 slots, categories, live camera with head tracking,
+    recording, sharing). This file is the primary development and test entry point.
+    It is plain HTML + CSS + JavaScript (JSDoc types). No build tools, no external requests.
+
+  HOW TO TEST
+    Host on GitHub Pages (HTTPS) and open in Chrome. Diagnostics (module list, browser
+    capabilities, real camera check, self-tests) live at #/diagnostics. Opening the address
+    with #tests runs the automated self-tests. Those use a SIMULATED camera. Only the manual
+    "Real camera check" card in Diagnostics, and Start camera on the Play screen, use the
+    real camera, and only when the player taps them.
+
+  SCREENS (hash routes)
+    #/                 Home: category cards and how it works
+    #/play/<id>        Play: live camera preview, 10 slots, reveal and place
+    #/result           Result: final ranking and share
+    #/diagnostics      Diagnostics: modules, browser checks, self-tests (also #tests)
+
+  FILE LAYOUT (search for the markers; each one is a future file)
+    STYLES               becomes src/styles.css
+    PACKS                becomes packs/<id>.json (bundled category data)
+    KERNEL               module registry and dependency rules (stays in the app entry)
+    MODULE: <name>       becomes src/<name>/index.js (shared, content, core, storage, camera,
+                         tracking, compositor, recorder, results, ui)
+    TESTS                becomes tests/*.js
+    BOOTSTRAP            becomes src/main.js
+
+  MODULES AND DEPENDENCY RULES (enforced at runtime by the KERNEL)
+    shared      no dependencies   config, environment detection, helpers
+    content     shared            category packs, items, item images (data, not code)
+    core        shared, content   game engine, pure logic, no DOM
+    storage     shared            persistence, offline layer, pack downloads
+    camera      shared            camera stream and permissions
+    tracking    shared            face/head tracking tiers, smoothing
+    compositor  shared            canvas drawing: camera, item, board
+    recorder    shared            canvas capture, optional microphone, save and share
+    results     shared, core, content   result card generation
+    ui          all of the above  screens, navigation, theming
+
+  CONTENT PACKS
+    A pack is JSON (schema 1): id, version, name, icon, accent, items[{id, name, image}].
+    Item images are a union by type: text (monogram), flag (ISO country code). New types
+    (licensed, user) are added by registering a renderer in the ui module. The game engine
+    never looks at images. New packs can be registered at runtime with catalog.register().
+    v1 uses text cards and flags only. No copyrighted player photos.
+
+  CONVENTIONS
+    1. A module is registry.define(name, deps, factory). The factory receives ONLY the
+       dependencies it declared and returns a frozen public API.
+    2. Module internals stay inside the factory. Never reach into another module.
+    3. Build DOM with textContent or element APIs. Never inject HTML strings.
+    4. Add a self-test for every new behavior. Never delete an existing test.
+    5. No external scripts, styles, fonts, images or network calls (see the CSP below).
+       Anything that needs the network must say so here and relax the CSP deliberately.
+    6. Bump version and phase in the config, and add a changelog line below.
+
+  MIGRATION TO A MULTI-FILE PROJECT (later step)
+    Split on the marker comments. Each module factory becomes
+    export default function create(deps) {...}, and the registry stays in the entry file.
+    The previous Vite/Svelte scaffold is kept in _archive/step1-vite-scaffold.
+
+  CAMERA (v0.3.0)
+    The camera module owns the stream (a controller with start, stop, switch, subscribe and
+    dispose). The Play screen creates one controller per visit. It is released when the player
+    taps Stop, leaves the screen (the router calls destroy), hides the page, or sends the
+    browser to the background. The camera never starts by itself: the player taps Start camera.
+    The preview is a plain video element (hardware decoded, no canvas copy). Capture profile
+    for budget phones: 640x480 ideal, 24 fps ideal with a 30 fps cap, audio off, front camera
+    first. The front preview is mirrored like a selfie, so face tracking (a later step) must
+    account for that. Errors are mapped to plain-language messages (camera module ERRORS).
+    Long explanations go in the note under the stage so they never cover the item card.
+
+  PRIVACY
+    No analytics. Camera frames stay in the video element on this device: nothing is copied,
+    recorded or sent anywhere, and the page makes no network requests. Microphone audio is
+    never requested in this version. Camera and microphone data never leave the device unless
+    the user explicitly agrees to an upload feature (none exists).
+
+  CHANGELOG
+    0.3.0  Camera integration: live preview replaces the placeholder; Start, Stop and Switch
+           camera; friendly permission, device and browser errors; release on leave, hide and
+           background; manual Real camera check in Diagnostics; automated tests use a
+           simulated camera. No face tracking, no recording, no microphone.
+    0.2.0  Steps 3-4 (built before the Step 2 device spike, at the owner's request):
+           three starter packs, game engine, result builder, Home/Play/Result screens,
+           hash router, diagnostics moved to #/diagnostics. Camera, tracking and
+           recording are NOT started: the play stage shows a placeholder.
+    0.1.0  Step 1: module registry, ten module shells, config, environment check,
+           responsive shell, in-page self-tests.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0d12" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src blob: data:; connect-src 'self'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Blind Ranking</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0d12'/%3E%3Ctext x='32' y='44' font-size='32' font-weight='700' text-anchor='middle' fill='%236ea8ff' font-family='sans-serif'%3E10%3C/text%3E%3C/svg%3E"
+    />
+    <style>
+      /* ===== STYLES (becomes src/styles.css) ===== */
+      :root {
+        color-scheme: dark;
+        --bg: #0b0d12;
+        --surface: #141822;
+        --surface-2: #1b2130;
+        --border: #262d3d;
+        --fg: #f2f4f8;
+        --muted: #9aa4b8;
+        --accent: #6ea8ff;
+        --ok: #3ecf8e;
+        --warn: #f5b14c;
+        --bad: #ff6b6b;
+        --radius: 16px;
+        --font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        --cat: var(--accent);
+        --cat-soft: rgba(110, 168, 255, 0.14);
+        --cat-line: rgba(110, 168, 255, 0.45);
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        -webkit-text-size-adjust: 100%;
+        background: var(--bg);
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.5 var(--font);
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      h1,
+      h2,
+      h3,
+      p,
+      ul,
+      ol {
+        margin: 0;
+      }
+
+      [tabindex='-1']:focus {
+        outline: none;
+      }
+
+      button {
+        font: inherit;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      .app {
+        min-height: 100vh;
+        min-height: 100dvh;
+        max-width: 960px;
+        margin: 0 auto;
+        padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .main {
+        flex: 1;
+        min-width: 0;
+      }
+
+      /* --- app header and footer --- */
+      .header {
+        padding-top: 4px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .brand__mark {
+        flex: none;
+        width: 44px;
+        height: 44px;
+        border-radius: 14px;
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+        font-size: 1.1rem;
+        color: #07101f;
+        background: linear-gradient(135deg, var(--accent), #a78bfa);
+      }
+
+      .title {
+        font-size: clamp(1.25rem, 5vw, 1.75rem);
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        line-height: 1.15;
+      }
+
+      .tagline {
+        color: var(--muted);
+        font-size: 0.875rem;
+      }
+
+      .footer {
+        color: var(--muted);
+        font-size: 0.8rem;
+        text-align: center;
+        padding: 8px 0;
+      }
+
+      .app[data-route='play'] .header,
+      .app[data-route='play'] .footer {
+        display: none;
+      }
+
+      /* --- screens --- */
+      .screen {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        animation: screen-in 0.2s ease-out;
+      }
+
+      @keyframes screen-in {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .topbar__title {
+        flex: 1;
+        min-width: 0;
+        font-size: 1.15rem;
+        font-weight: 700;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .icon-btn {
+        flex: none;
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--fg);
+        font-size: 1.25rem;
+        cursor: pointer;
+      }
+
+      .icon-btn:focus-visible,
+      .btn:focus-visible,
+      .cat:focus-visible,
+      .slot:focus-visible,
+      .link-btn:focus-visible {
+        outline: 3px solid #ffffff;
+        outline-offset: 2px;
+      }
+
+      .hero {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 4px 0;
+      }
+
+      .hero__title {
+        font-size: clamp(1.6rem, 7vw, 2.4rem);
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        line-height: 1.1;
+        background: linear-gradient(90deg, #ffffff, var(--accent));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+
+      .section-title {
+        font-size: 1rem;
+        font-weight: 700;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 0.8rem;
+      }
+
+      /* --- home: categories and steps --- */
+      .cats {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+      }
+
+      @media (min-width: 620px) {
+        .cats {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .cat {
+          flex-direction: column;
+          align-items: flex-start;
+          justify-content: space-between;
+          min-height: 150px;
+        }
+      }
+
+      .cat {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        width: 100%;
+        min-height: 76px;
+        padding: 14px 16px;
+        border-radius: var(--radius);
+        border: 1px solid var(--cat-line);
+        background: linear-gradient(135deg, var(--cat-soft), var(--surface) 75%);
+        color: var(--fg);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .cat__icon {
+        flex: none;
+        font-size: 2rem;
+        line-height: 1;
+      }
+
+      .cat__body {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .cat__name {
+        font-size: 1.1rem;
+      }
+
+      .cat__go {
+        flex: none;
+        color: var(--cat);
+        font-size: 1.6rem;
+        line-height: 1;
+      }
+
+      .steps {
+        list-style: none;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .step {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+      }
+
+      .step__n {
+        flex: none;
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+        font-size: 0.85rem;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        color: var(--accent);
+      }
+
+      .step__body {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+
+      .link-btn {
+        align-self: center;
+        min-height: 44px;
+        padding: 0 12px;
+        background: none;
+        border: 0;
+        color: var(--muted);
+        text-decoration: underline;
+        cursor: pointer;
+      }
+
+      /* --- play --- */
+      .play {
+        gap: 12px;
+      }
+
+      .stage {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        max-height: 42vh;
+        border-radius: var(--radius);
+        overflow: hidden;
+        border: 1px solid var(--cat-line);
+        background:
+          radial-gradient(120% 90% at 50% 90%, var(--cat-soft), transparent 62%),
+          linear-gradient(180deg, #10141f, #0a0d14);
+      }
+
+      .stage__person {
+        position: absolute;
+        left: 50%;
+        bottom: -4%;
+        transform: translateX(-50%);
+        width: 56%;
+        height: 72%;
+        color: #1c2334;
+      }
+
+      .stage__person svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      .stage__card {
+        position: absolute;
+        left: 50%;
+        top: 6%;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 150px;
+        max-width: 88%;
+        padding: 8px 14px 8px 8px;
+        border-radius: 16px;
+        background: rgba(20, 24, 34, 0.94);
+        border: 1px solid var(--cat-line);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+        z-index: 2;
+      }
+
+      .stage__card.pop {
+        animation: pop 0.22s ease-out;
+      }
+
+      @keyframes pop {
+        from {
+          transform: translateX(-50%) scale(0.8);
+          opacity: 0;
+        }
+        to {
+          transform: translateX(-50%) scale(1);
+          opacity: 1;
+        }
+      }
+
+      .stage__text {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        line-height: 1.2;
+      }
+
+      .stage__text strong {
+        overflow-wrap: anywhere;
+      }
+
+      /* --- camera: layers are media (0), item card (2), live chip and controls (3) --- */
+      [hidden] {
+        display: none !important;
+      }
+
+      .stage__media {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+      }
+
+      .stage__video {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        object-fit: cover;
+        background: #000;
+      }
+
+      /* The front camera is mirrored like a selfie. Face tracking must account for this later. */
+      .stage__video--mirror {
+        transform: scaleX(-1);
+      }
+
+      .stage__live {
+        position: absolute;
+        left: 8px;
+        top: 8px;
+        z-index: 3;
+        padding: 2px 6px;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: #ffffff;
+        background: rgba(200, 30, 30, 0.88);
+      }
+
+      .stage__cam {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        pointer-events: none;
+      }
+
+      .stage__cam > * {
+        pointer-events: auto;
+      }
+
+      .stage__controls {
+        position: absolute;
+        right: 8px;
+        bottom: 8px;
+        display: flex;
+        gap: 8px;
+      }
+
+      .stage__panel {
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 8px 8px 8px 12px;
+        border-radius: 14px;
+        background: rgba(11, 13, 18, 0.9);
+        border: 1px solid var(--border);
+      }
+
+      .stage__panel[data-camera-panel='error'] {
+        border-color: var(--bad);
+      }
+
+      .stage__panel[data-camera-panel='error'] .stage__panel-title {
+        color: var(--bad);
+      }
+
+      .stage__panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .stage__panel-title {
+        min-width: 0;
+        font-size: 0.95rem;
+        line-height: 1.2;
+        overflow-wrap: anywhere;
+      }
+
+      /* Explanation under the stage. It is in the page flow, so it can never cover the item card. */
+      .cam-note {
+        margin: 8px 2px 0;
+        color: var(--muted);
+        font-size: 0.85rem;
+        line-height: 1.35;
+      }
+
+      .cam-note--error {
+        color: var(--fg);
+      }
+
+      .cam-btn {
+        flex: none;
+        min-height: 44px;
+        padding: 0 14px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: rgba(11, 13, 18, 0.85);
+        color: var(--fg);
+        font-weight: 700;
+        font-size: 0.9rem;
+        cursor: pointer;
+      }
+
+      .cam-btn--primary {
+        background: var(--cat);
+        border-color: transparent;
+        color: #07101f;
+      }
+
+      .cam-btn:focus-visible {
+        outline: 3px solid #ffffff;
+        outline-offset: 2px;
+      }
+
+      /* --- diagnostics: manual camera check --- */
+      .check-video {
+        width: 100%;
+        max-width: 240px;
+        aspect-ratio: 4 / 3;
+        border-radius: 12px;
+        object-fit: cover;
+        background: #000;
+      }
+
+      .check-video--mirror {
+        transform: scaleX(-1);
+      }
+
+      .row__value {
+        min-width: 0;
+        text-align: right;
+        font-size: 0.9rem;
+        overflow-wrap: anywhere;
+      }
+
+      .value--ok {
+        color: var(--ok);
+      }
+
+      .value--bad {
+        color: var(--bad);
+      }
+
+      .value--info {
+        color: var(--muted);
+      }
+
+      .avatar {
+        flex: none;
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+        font-size: 0.95rem;
+        letter-spacing: 0.02em;
+        color: #ffffff;
+        user-select: none;
+      }
+
+      .avatar--sm {
+        width: 32px;
+        height: 32px;
+        font-size: 0.75rem;
+      }
+
+      .avatar--flag {
+        background: var(--surface-2);
+        font-size: 1.5rem;
+        letter-spacing: 0;
+      }
+
+      .avatar--flag.avatar--sm {
+        font-size: 1.1rem;
+      }
+
+      .avatar--mystery {
+        background: var(--surface-2);
+        color: var(--cat);
+        font-size: 1.4rem;
+      }
+
+      .slots {
+        list-style: none;
+        padding: 0;
+        display: grid;
+        grid-template-rows: repeat(5, auto);
+        grid-auto-flow: column;
+        grid-auto-columns: minmax(0, 1fr);
+        gap: 8px;
+      }
+
+      .slots > li {
+        min-width: 0;
+        display: flex;
+      }
+
+      .slot {
+        flex: 1;
+        min-width: 0;
+        min-height: 52px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 10px;
+        border-radius: 12px;
+        border: 1px dashed var(--border);
+        background: var(--surface);
+        color: var(--muted);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .slot__rank {
+        flex: none;
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+        font-size: 0.85rem;
+        background: var(--surface-2);
+        color: var(--muted);
+      }
+
+      .slot__name {
+        min-width: 0;
+        font-size: 0.875rem;
+        line-height: 1.2;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        overflow-wrap: anywhere;
+      }
+
+      .slot--ready {
+        border-style: solid;
+        border-color: var(--cat);
+        color: var(--cat);
+      }
+
+      .slot--filled {
+        border-style: solid;
+        border-color: var(--cat-line);
+        background: var(--cat-soft);
+        color: var(--fg);
+      }
+
+      .slot--filled .slot__rank {
+        background: var(--cat);
+        color: #07101f;
+      }
+
+      .slot:disabled {
+        cursor: default;
+      }
+
+      .actionbar {
+        position: sticky;
+        bottom: 0;
+        z-index: 2;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 14px 0 max(8px, env(safe-area-inset-bottom));
+        background: linear-gradient(180deg, rgba(11, 13, 18, 0), var(--bg) 40%);
+      }
+
+      @media (min-width: 760px) {
+        .play {
+          display: grid;
+          grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+          grid-template-areas:
+            'top top'
+            'stage slots'
+            'action action';
+          column-gap: 20px;
+        }
+        .play > .topbar {
+          grid-area: top;
+        }
+        .play > .play__stage {
+          grid-area: stage;
+        }
+        .play > .play__slots {
+          grid-area: slots;
+        }
+        .play > .actionbar {
+          grid-area: action;
+        }
+        .play .stage {
+          max-height: none;
+        }
+        .play .slots {
+          grid-template-rows: none;
+          grid-auto-flow: row;
+          grid-auto-columns: auto;
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+
+      /* --- buttons and chips --- */
+      .btn {
+        min-height: 52px;
+        padding: 0 22px;
+        border: 0;
+        border-radius: 14px;
+        background: var(--cat, var(--accent));
+        color: #07101f;
+        font-weight: 700;
+        font-size: 1.05rem;
+        cursor: pointer;
+        align-self: flex-start;
+      }
+
+      .btn--block {
+        align-self: stretch;
+        width: 100%;
+      }
+
+      .btn--ghost {
+        background: transparent;
+        color: var(--fg);
+        border: 1px solid var(--border);
+      }
+
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .chip {
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        font-size: 0.8rem;
+        white-space: nowrap;
+        color: var(--muted);
+      }
+
+      .chip--ok,
+      .chip--ready {
+        color: var(--ok);
+        border-color: var(--ok);
+      }
+
+      .chip--bad {
+        color: var(--bad);
+        border-color: var(--bad);
+      }
+
+      .chip--info,
+      .chip--foundation {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 0.85rem;
+        text-align: center;
+        min-height: 1.3em;
+      }
+
+      .muted {
+        color: var(--muted);
+        font-size: 0.875rem;
+      }
+
+      .mono {
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 0.75rem;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+      }
+
+      /* --- result --- */
+      .ranking {
+        list-style: none;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .rank-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 14px;
+        border-radius: 12px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+      }
+
+      .rank-row:nth-child(-n + 3) {
+        border-color: var(--cat-line);
+        background: var(--cat-soft);
+      }
+
+      .rank-row__n {
+        flex: none;
+        width: 28px;
+        font-weight: 800;
+        color: var(--cat);
+        text-align: center;
+      }
+
+      .rank-row__name {
+        min-width: 0;
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+
+      .status {
+        min-height: 1.5em;
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .result-actions {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      /* --- diagnostics --- */
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 16px;
+        align-content: start;
+      }
+
+      @media (min-width: 720px) {
+        .grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .span-2 {
+          grid-column: 1 / -1;
+        }
+      }
+
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .card h3 {
+        font-size: 1.05rem;
+      }
+
+      .list {
+        list-style: none;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 0;
+        border-top: 1px solid var(--border);
+      }
+
+      .row:first-child {
+        border-top: 0;
+      }
+
+      .row__main {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+
+      .summary {
+        font-weight: 700;
+      }
+
+      .summary--ok {
+        color: var(--ok);
+      }
+
+      .summary--bad {
+        color: var(--bad);
+      }
+
+      .tests {
+        list-style: none;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 0.9rem;
+      }
+
+      .tests li {
+        display: flex;
+        gap: 8px;
+        overflow-wrap: anywhere;
+      }
+
+      .test--ok {
+        color: var(--ok);
+      }
+
+      .test--bad {
+        color: var(--bad);
+      }
+
+      .fatal {
+        background: var(--surface);
+        border: 1px solid var(--bad);
+        border-radius: var(--radius);
+        padding: 16px;
+      }
+
+      .fatal pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        color: var(--bad);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          animation: none !important;
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app" class="app"><p class="muted">Loading…</p></div>
+    <noscript><p class="muted">This app needs JavaScript enabled.</p></noscript>
+
+    <!-- ===== PACKS (becomes packs/<id>.json). Data only, never executed. ===== -->
+    <script type="application/json" id="pack-football" data-pack>
+      {
+        "schema": 1,
+        "id": "football",
+        "version": 1,
+        "order": 1,
+        "name": "Football",
+        "icon": "⚽",
+        "accent": "#34d399",
+        "tagline": "Rank the legends",
+        "defaultImage": { "type": "text" },
+        "items": [
+          { "id": "messi", "name": "Lionel Messi" },
+          { "id": "ronaldo", "name": "Cristiano Ronaldo" },
+          { "id": "neymar", "name": "Neymar Jr" },
+          { "id": "mbappe", "name": "Kylian Mbappé" },
+          { "id": "haaland", "name": "Erling Haaland" },
+          { "id": "de-bruyne", "name": "Kevin De Bruyne" },
+          { "id": "salah", "name": "Mohamed Salah" },
+          { "id": "lewandowski", "name": "Robert Lewandowski" },
+          { "id": "modric", "name": "Luka Modrić" },
+          { "id": "benzema", "name": "Karim Benzema" },
+          { "id": "vinicius", "name": "Vinícius Júnior" },
+          { "id": "bellingham", "name": "Jude Bellingham" },
+          { "id": "kane", "name": "Harry Kane" },
+          { "id": "son", "name": "Son Heung-min" },
+          { "id": "van-dijk", "name": "Virgil van Dijk" },
+          { "id": "ramos", "name": "Sergio Ramos" },
+          { "id": "ibrahimovic", "name": "Zlatan Ibrahimović" },
+          { "id": "ronaldinho", "name": "Ronaldinho" },
+          { "id": "zidane", "name": "Zinedine Zidane" },
+          { "id": "pele", "name": "Pelé" },
+          { "id": "maradona", "name": "Diego Maradona" },
+          { "id": "henry", "name": "Thierry Henry" },
+          { "id": "iniesta", "name": "Andrés Iniesta" },
+          { "id": "xavi", "name": "Xavi Hernández" },
+          { "id": "rooney", "name": "Wayne Rooney" },
+          { "id": "buffon", "name": "Gianluigi Buffon" },
+          { "id": "neuer", "name": "Manuel Neuer" },
+          { "id": "griezmann", "name": "Antoine Griezmann" },
+          { "id": "saka", "name": "Bukayo Saka" },
+          { "id": "yamal", "name": "Lamine Yamal" },
+          { "id": "pedri", "name": "Pedri" },
+          { "id": "rodri", "name": "Rodri" }
+        ]
+      }
+    </script>
+    <script type="application/json" id="pack-cricket" data-pack>
+      {
+        "schema": 1,
+        "id": "cricket",
+        "version": 1,
+        "order": 2,
+        "name": "Cricket",
+        "icon": "🏏",
+        "accent": "#60a5fa",
+        "tagline": "Rank the greats",
+        "defaultImage": { "type": "text" },
+        "items": [
+          { "id": "tendulkar", "name": "Sachin Tendulkar" },
+          { "id": "kohli", "name": "Virat Kohli" },
+          { "id": "dhoni", "name": "MS Dhoni" },
+          { "id": "rohit", "name": "Rohit Sharma" },
+          { "id": "ponting", "name": "Ricky Ponting" },
+          { "id": "lara", "name": "Brian Lara" },
+          { "id": "kallis", "name": "Jacques Kallis" },
+          { "id": "warne", "name": "Shane Warne" },
+          { "id": "muralitharan", "name": "Muttiah Muralitharan" },
+          { "id": "akram", "name": "Wasim Akram" },
+          { "id": "imran", "name": "Imran Khan" },
+          { "id": "kapil", "name": "Kapil Dev" },
+          { "id": "gavaskar", "name": "Sunil Gavaskar" },
+          { "id": "dravid", "name": "Rahul Dravid" },
+          { "id": "ganguly", "name": "Sourav Ganguly" },
+          { "id": "de-villiers", "name": "AB de Villiers" },
+          { "id": "gayle", "name": "Chris Gayle" },
+          { "id": "smith", "name": "Steve Smith" },
+          { "id": "williamson", "name": "Kane Williamson" },
+          { "id": "root", "name": "Joe Root" },
+          { "id": "stokes", "name": "Ben Stokes" },
+          { "id": "bumrah", "name": "Jasprit Bumrah" },
+          { "id": "babar", "name": "Babar Azam" },
+          { "id": "shakib", "name": "Shakib Al Hasan" },
+          { "id": "tamim", "name": "Tamim Iqbal" },
+          { "id": "mushfiqur", "name": "Mushfiqur Rahim" },
+          { "id": "mustafizur", "name": "Mustafizur Rahman" },
+          { "id": "mcgrath", "name": "Glenn McGrath" },
+          { "id": "steyn", "name": "Dale Steyn" },
+          { "id": "anderson", "name": "James Anderson" },
+          { "id": "rashid", "name": "Rashid Khan" },
+          { "id": "sangakkara", "name": "Kumar Sangakkara" }
+        ]
+      }
+    </script>
+    <script type="application/json" id="pack-countries" data-pack>
+      {
+        "schema": 1,
+        "id": "countries",
+        "version": 1,
+        "order": 3,
+        "name": "Countries",
+        "icon": "🌍",
+        "accent": "#f59e0b",
+        "tagline": "Rank the nations",
+        "defaultImage": { "type": "text" },
+        "items": [
+          { "id": "br", "name": "Brazil", "image": { "type": "flag", "code": "BR" } },
+          { "id": "ar", "name": "Argentina", "image": { "type": "flag", "code": "AR" } },
+          { "id": "fr", "name": "France", "image": { "type": "flag", "code": "FR" } },
+          { "id": "de", "name": "Germany", "image": { "type": "flag", "code": "DE" } },
+          { "id": "es", "name": "Spain", "image": { "type": "flag", "code": "ES" } },
+          { "id": "it", "name": "Italy", "image": { "type": "flag", "code": "IT" } },
+          { "id": "pt", "name": "Portugal", "image": { "type": "flag", "code": "PT" } },
+          { "id": "nl", "name": "Netherlands", "image": { "type": "flag", "code": "NL" } },
+          { "id": "be", "name": "Belgium", "image": { "type": "flag", "code": "BE" } },
+          { "id": "hr", "name": "Croatia", "image": { "type": "flag", "code": "HR" } },
+          { "id": "jp", "name": "Japan", "image": { "type": "flag", "code": "JP" } },
+          { "id": "kr", "name": "South Korea", "image": { "type": "flag", "code": "KR" } },
+          { "id": "bd", "name": "Bangladesh", "image": { "type": "flag", "code": "BD" } },
+          { "id": "in", "name": "India", "image": { "type": "flag", "code": "IN" } },
+          { "id": "pk", "name": "Pakistan", "image": { "type": "flag", "code": "PK" } },
+          { "id": "lk", "name": "Sri Lanka", "image": { "type": "flag", "code": "LK" } },
+          { "id": "np", "name": "Nepal", "image": { "type": "flag", "code": "NP" } },
+          { "id": "us", "name": "United States", "image": { "type": "flag", "code": "US" } },
+          { "id": "ca", "name": "Canada", "image": { "type": "flag", "code": "CA" } },
+          { "id": "mx", "name": "Mexico", "image": { "type": "flag", "code": "MX" } },
+          { "id": "au", "name": "Australia", "image": { "type": "flag", "code": "AU" } },
+          { "id": "nz", "name": "New Zealand", "image": { "type": "flag", "code": "NZ" } },
+          { "id": "eg", "name": "Egypt", "image": { "type": "flag", "code": "EG" } },
+          { "id": "ma", "name": "Morocco", "image": { "type": "flag", "code": "MA" } },
+          { "id": "ng", "name": "Nigeria", "image": { "type": "flag", "code": "NG" } },
+          { "id": "za", "name": "South Africa", "image": { "type": "flag", "code": "ZA" } },
+          { "id": "sa", "name": "Saudi Arabia", "image": { "type": "flag", "code": "SA" } },
+          { "id": "tr", "name": "Turkey", "image": { "type": "flag", "code": "TR" } },
+          { "id": "ch", "name": "Switzerland", "image": { "type": "flag", "code": "CH" } },
+          { "id": "se", "name": "Sweden", "image": { "type": "flag", "code": "SE" } },
+          { "id": "no", "name": "Norway", "image": { "type": "flag", "code": "NO" } },
+          { "id": "uy", "name": "Uruguay", "image": { "type": "flag", "code": "UY" } }
+        ]
+      }
+    </script>
+    <!-- ===== END PACKS ===== -->
+
+    <script>
+      (function () {
+        'use strict';
+
+        /* ===== EARLY ERROR HANDLER (part of BOOTSTRAP): a load failure must be visible ===== */
+        window.addEventListener('error', (event) => {
+          const root = document.getElementById('app');
+          if (root && !root.querySelector('[data-footer]')) {
+            renderFatal(root, event.error || event.message);
+          }
+        });
+
+        /* ===== KERNEL: module registry (stays in the app entry after migration) ===== */
+
+        /**
+         * Allowed dependencies per module. The registry refuses anything else.
+         * @type {Readonly<Record<string, readonly string[]>>}
+         */
+        const ARCHITECTURE_RULES = deepFreeze({
+          shared: [],
+          content: ['shared'],
+          core: ['shared', 'content'],
+          storage: ['shared'],
+          camera: ['shared'],
+          tracking: ['shared'],
+          compositor: ['shared'],
+          recorder: ['shared'],
+          results: ['shared', 'core', 'content'],
+          ui: [
+            'shared',
+            'content',
+            'core',
+            'storage',
+            'camera',
+            'tracking',
+            'compositor',
+            'recorder',
+            'results',
+          ],
+        });
+
+        /**
+         * Recursively freezes plain objects and arrays.
+         * @template T
+         * @param {T} value
+         * @returns {T}
+         */
+        function deepFreeze(value) {
+          if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+            Object.freeze(value);
+            for (const key of Object.keys(value)) {
+              deepFreeze(value[key]);
+            }
+          }
+          return value;
+        }
+
+        /**
+         * Creates a module registry that enforces a dependency rule table.
+         * @param {Readonly<Record<string, readonly string[]>>} allowed module name to allowed deps
+         */
+        function createRegistry(allowed) {
+          /** @type {Map<string, {name: string, deps: string[], factory: Function}>} */
+          const definitions = new Map();
+          /** @type {Map<string, Readonly<Record<string, unknown>>>} */
+          const instances = new Map();
+          /** @type {string[]} */
+          const resolving = [];
+
+          /**
+           * @param {string} name
+           * @param {string[]} deps
+           * @param {(deps: Readonly<Record<string, any>>) => Record<string, unknown>} factory
+           */
+          function define(name, deps, factory) {
+            if (!Object.prototype.hasOwnProperty.call(allowed, name)) {
+              throw new Error(`Unknown module "${name}"`);
+            }
+            if (definitions.has(name)) {
+              throw new Error(`Module "${name}" is already defined`);
+            }
+            if (typeof factory !== 'function') {
+              throw new Error(`Module "${name}" needs a factory function`);
+            }
+            for (const dep of deps) {
+              if (!allowed[name].includes(dep)) {
+                throw new Error(`Module "${name}" must not depend on "${dep}"`);
+              }
+            }
+            definitions.set(name, { name, deps: [...deps], factory });
+          }
+
+          /** @param {string} name */
+          function resolve(name) {
+            const existing = instances.get(name);
+            if (existing) {
+              return existing;
+            }
+            const definition = definitions.get(name);
+            if (!definition) {
+              throw new Error(`Module "${name}" is not defined`);
+            }
+            if (resolving.includes(name)) {
+              throw new Error(`Circular dependency: ${[...resolving, name].join(' > ')}`);
+            }
+            resolving.push(name);
+            try {
+              /** @type {Record<string, unknown>} */
+              const injected = {};
+              for (const dep of definition.deps) {
+                injected[dep] = resolve(dep);
+              }
+              const api = definition.factory(Object.freeze(injected));
+              if (!api || typeof api !== 'object') {
+                throw new Error(`Module "${name}" must return an object`);
+              }
+              const frozen = Object.freeze(api);
+              instances.set(name, frozen);
+              return frozen;
+            } finally {
+              resolving.pop();
+            }
+          }
+
+          /** Resolves every module named in the rule table. */
+          function boot() {
+            for (const name of Object.keys(allowed)) {
+              resolve(name);
+            }
+          }
+
+          /** @returns {{name: string, deps: string[]}[]} */
+          function list() {
+            return [...definitions.values()].map(({ name, deps }) => ({ name, deps: [...deps] }));
+          }
+
+          return Object.freeze({ define, get: resolve, boot, list });
+        }
+
+        const registry = createRegistry(ARCHITECTURE_RULES);
+
+        /* ===== END KERNEL ===== */
+
+        /* ===== MODULE: shared | target: src/shared/index.js ===== */
+        registry.define('shared', [], () => {
+          const config = deepFreeze({
+            app: {
+              name: 'Blind Ranking',
+              version: '0.3.0',
+              phase: 'Camera integration',
+              buildDate: '2026-10-31',
+            },
+            game: { slotCount: 10 },
+            platform: { minAndroid: 10, referenceDevices: ['Realme C15', 'Realme C25Y'] },
+          });
+
+          const MODULE_STATUSES = ['ready', 'foundation', 'planned'];
+
+          /**
+           * Describes a module for the diagnostics screen. Every module exposes one as `meta`.
+           * @param {string} name
+           * @param {'ready'|'foundation'|'planned'} status
+           * @param {number} step roadmap step that implements (or finishes) the module
+           * @param {string} description
+           */
+          function moduleMeta(name, status, step, description) {
+            if (!MODULE_STATUSES.includes(status)) {
+              throw new Error(`Invalid module status "${status}"`);
+            }
+            return Object.freeze({ name, status, step, description });
+          }
+
+          /**
+           * Runs a probe and returns its result, or a fallback if it throws.
+           * @template T
+           * @param {() => T} probe
+           * @param {T} fallback
+           * @returns {T}
+           */
+          function attempt(probe, fallback) {
+            try {
+              return probe();
+            } catch (_error) {
+              return fallback;
+            }
+          }
+
+          /**
+           * Reads browser capabilities. Never throws and never asks for permissions.
+           * @param {any} [win] window-like object (a stub in tests)
+           */
+          function detectEnv(win = window) {
+            const yes = (probe) => attempt(() => Boolean(probe()), false);
+            return Object.freeze({
+              protocol: attempt(() => String(win.location.protocol), 'unknown'),
+              userAgent: attempt(() => String(win.navigator.userAgent), 'unknown'),
+              secureContext: yes(() => win.isSecureContext),
+              online: yes(() => win.navigator.onLine),
+              getUserMedia: yes(() => typeof win.navigator.mediaDevices.getUserMedia === 'function'),
+              mediaRecorder: yes(() => typeof win.MediaRecorder === 'function'),
+              captureStream: yes(
+                () => typeof win.HTMLCanvasElement.prototype.captureStream === 'function',
+              ),
+              faceDetector: yes(() => typeof win.FaceDetector === 'function'),
+              webAssembly: yes(() => typeof win.WebAssembly === 'object'),
+              localStorage: yes(() => {
+                const key = '__br_probe__';
+                win.localStorage.setItem(key, '1');
+                win.localStorage.removeItem(key);
+                return true;
+              }),
+              indexedDB: yes(() => win.indexedDB !== null && typeof win.indexedDB === 'object'),
+            });
+          }
+
+          return {
+            meta: moduleMeta('shared', 'ready', 1, 'Config, environment detection, helpers.'),
+            config,
+            moduleMeta,
+            detectEnv,
+          };
+        });
+        /* ===== END MODULE: shared ===== */
+
+        /* ===== MODULE: content | target: src/content/index.js ===== */
+        registry.define('content', ['shared'], ({ shared }) => {
+          const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+          const SLUG = /^[a-z0-9-]+$/;
+
+          /**
+           * Lists every problem found in a pack. An empty list means the pack is valid.
+           * @param {any} pack
+           * @param {number} minItems
+           * @returns {string[]}
+           */
+          function packErrors(pack, minItems) {
+            const errors = [];
+            if (!pack || typeof pack !== 'object') {
+              return ['pack must be an object'];
+            }
+            if (pack.schema !== 1) {
+              errors.push('schema must be 1');
+            }
+            if (typeof pack.id !== 'string' || !SLUG.test(pack.id)) {
+              errors.push('id must be a lowercase slug');
+            }
+            if (typeof pack.name !== 'string' || pack.name.trim() === '') {
+              errors.push('name is required');
+            }
+            if (!Number.isInteger(pack.version) || pack.version < 1) {
+              errors.push('version must be a positive integer');
+            }
+            if (pack.accent !== undefined && !HEX_COLOR.test(String(pack.accent))) {
+              errors.push('accent must be a #rrggbb color');
+            }
+            if (!Array.isArray(pack.items)) {
+              errors.push('items must be a list');
+              return errors;
+            }
+            if (pack.items.length < minItems) {
+              errors.push(`needs at least ${minItems} items (has ${pack.items.length})`);
+            }
+            const seen = new Set();
+            pack.items.forEach((item, index) => {
+              const label = `item ${index + 1}`;
+              if (!item || typeof item !== 'object') {
+                errors.push(`${label} must be an object`);
+                return;
+              }
+              if (typeof item.id !== 'string' || !SLUG.test(item.id)) {
+                errors.push(`${label} needs a slug id`);
+              } else if (seen.has(item.id)) {
+                errors.push(`${label} repeats id "${item.id}"`);
+              } else {
+                seen.add(item.id);
+              }
+              if (typeof item.name !== 'string' || item.name.trim() === '') {
+                errors.push(`${label} needs a name`);
+              }
+              if (item.image !== undefined) {
+                if (!item.image || typeof item.image.type !== 'string') {
+                  errors.push(`${label} image needs a type`);
+                } else if (item.image.type === 'flag' && !/^[A-Za-z]{2}$/.test(item.image.code)) {
+                  errors.push(`${label} flag image needs a 2-letter code`);
+                }
+              }
+            });
+            return errors;
+          }
+
+          /**
+           * Throws if the pack is invalid.
+           * @param {any} pack
+           * @param {number} [minItems] defaults to the number of ranking slots
+           */
+          function validatePack(pack, minItems = shared.config.game.slotCount) {
+            const errors = packErrors(pack, minItems);
+            if (errors.length > 0) {
+              const id = pack && typeof pack.id === 'string' ? pack.id : '?';
+              throw new Error(`Invalid pack "${id}": ${errors.join('; ')}`);
+            }
+          }
+
+          /** Fills defaults and freezes a validated pack. @param {any} pack */
+          function normalizePack(pack) {
+            const fallbackImage = pack.defaultImage || { type: 'text' };
+            return deepFreeze({
+              id: pack.id,
+              name: pack.name.trim(),
+              version: pack.version,
+              order: typeof pack.order === 'number' ? pack.order : 100,
+              icon: pack.icon || '★',
+              accent: pack.accent || '#6ea8ff',
+              tagline: pack.tagline || '',
+              items: pack.items.map((item) => ({
+                id: item.id,
+                name: item.name.trim(),
+                image: item.image || fallbackImage,
+              })),
+            });
+          }
+
+          /**
+           * A catalog holds installed packs. New packs (downloaded later) use register().
+           * @param {any[]} [initialPacks]
+           */
+          function createCatalog(initialPacks = []) {
+            /** @type {Map<string, any>} */
+            const packs = new Map();
+
+            /** @param {any} pack */
+            function register(pack) {
+              validatePack(pack);
+              const existing = packs.get(pack.id);
+              if (existing && existing.version >= pack.version) {
+                throw new Error(
+                  `Pack "${pack.id}" version ${existing.version} is already installed`,
+                );
+              }
+              packs.set(pack.id, normalizePack(pack));
+            }
+
+            function categories() {
+              return [...packs.values()]
+                .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
+                .map((p) =>
+                  Object.freeze({
+                    id: p.id,
+                    name: p.name,
+                    icon: p.icon,
+                    accent: p.accent,
+                    tagline: p.tagline,
+                    version: p.version,
+                    itemCount: p.items.length,
+                  }),
+                );
+            }
+
+            /** @param {string} id */
+            const get = (id) => packs.get(id) || null;
+
+            initialPacks.forEach(register);
+            return Object.freeze({ register, categories, get });
+          }
+
+          /**
+           * Reads the bundled packs from JSON blocks in the page.
+           * @param {Document} [doc]
+           */
+          function loadBundledPacks(doc = document) {
+            return Array.from(doc.querySelectorAll('script[type="application/json"][data-pack]')).map(
+              (node) => {
+                try {
+                  return JSON.parse(node.textContent || '');
+                } catch (error) {
+                  throw new Error(`Pack "${node.id || '?'}" is not valid JSON: ${error.message}`);
+                }
+              },
+            );
+          }
+
+          /**
+           * Regional-indicator flag emoji for a 2-letter country code, or '' if invalid.
+           * @param {string} code
+           */
+          function flagEmoji(code) {
+            if (!/^[A-Za-z]{2}$/.test(String(code))) {
+              return '';
+            }
+            const points = Array.from(code.toUpperCase()).map(
+              (ch) => 0x1f1e6 + ch.charCodeAt(0) - 65,
+            );
+            return String.fromCodePoint(...points);
+          }
+
+          /**
+           * Up to two capital letters for a monogram: first letter of the first and last word.
+           * @param {string} name
+           */
+          function initials(name) {
+            const words = String(name).trim().split(/\s+/).filter(Boolean);
+            if (words.length === 0) {
+              return '?';
+            }
+            const first = Array.from(words[0])[0];
+            const last = words.length > 1 ? Array.from(words[words.length - 1])[0] : '';
+            return (first + last).toLocaleUpperCase();
+          }
+
+          /**
+           * Stable hue (0-359) for a key, so each item keeps its monogram color.
+           * @param {string} key
+           */
+          function hueFor(key) {
+            let hash = 0;
+            for (const ch of String(key)) {
+              hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+            }
+            return hash % 360;
+          }
+
+          const catalog = createCatalog(loadBundledPacks());
+
+          return {
+            meta: shared.moduleMeta(
+              'content',
+              'ready',
+              3,
+              'Starter packs: football, cricket, countries. Validated, extendable.',
+            ),
+            catalog,
+            createCatalog,
+            validatePack,
+            loadBundledPacks,
+            flagEmoji,
+            initials,
+            hueFor,
+          };
+        });
+        /* ===== END MODULE: content ===== */
+
+        /* ===== MODULE: core | target: src/core/index.js ===== */
+        registry.define('core', ['shared'], ({ shared }) => {
+          /**
+           * Small seeded random generator (mulberry32). Same seed, same sequence.
+           * @param {number} seed
+           * @returns {() => number} values in [0, 1)
+           */
+          function createRng(seed) {
+            let a = seed >>> 0;
+            return function next() {
+              a = (a + 0x6d2b79f5) >>> 0;
+              let t = a;
+              t = Math.imul(t ^ (t >>> 15), t | 1);
+              t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+              return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            };
+          }
+
+          /**
+           * Fisher-Yates shuffle that returns a new array.
+           * @template T
+           * @param {readonly T[]} list
+           * @param {() => number} [rng]
+           * @returns {T[]}
+           */
+          function shuffle(list, rng = Math.random) {
+            const out = list.slice();
+            for (let i = out.length - 1; i > 0; i -= 1) {
+              const j = Math.floor(rng() * (i + 1));
+              [out[i], out[j]] = [out[j], out[i]];
+            }
+            return out;
+          }
+
+          /**
+           * One blind-ranking game: reveal a random item, place it in a free slot, repeat.
+           * Pure logic, no DOM. Phases: idle (nothing revealed), revealed, complete.
+           * @template T
+           * @param {{items: readonly T[], slotCount?: number, rng?: () => number}} options
+           */
+          function createGame({ items, slotCount = shared.config.game.slotCount, rng = Math.random }) {
+            if (!Number.isInteger(slotCount) || slotCount < 1) {
+              throw new Error('slotCount must be a positive integer');
+            }
+            if (!Array.isArray(items) || items.length < slotCount) {
+              throw new Error(`A game needs at least ${slotCount} items`);
+            }
+            const deck = shuffle(items, rng).slice(0, slotCount);
+            /** @type {(T|null)[]} */
+            const slots = new Array(slotCount).fill(null);
+            /** @type {T|null} */
+            let current = null;
+            let drawn = 0;
+            let placed = 0;
+            const listeners = new Set();
+
+            function phase() {
+              if (placed === slotCount) {
+                return 'complete';
+              }
+              return current === null ? 'idle' : 'revealed';
+            }
+
+            function snapshot() {
+              return Object.freeze({
+                phase: phase(),
+                current,
+                slots: Object.freeze(slots.slice()),
+                placed,
+                drawn,
+                slotCount,
+              });
+            }
+
+            function notify() {
+              const snap = snapshot();
+              listeners.forEach((listener) => listener(snap));
+            }
+
+            function reveal() {
+              if (phase() === 'complete') {
+                throw new Error('The game is complete');
+              }
+              if (current !== null) {
+                throw new Error('Place the current item first');
+              }
+              current = deck[drawn];
+              drawn += 1;
+              notify();
+              return current;
+            }
+
+            /** @param {number} index zero-based slot index */
+            function place(index) {
+              if (current === null) {
+                throw new Error('Reveal an item first');
+              }
+              if (!Number.isInteger(index) || index < 0 || index >= slotCount) {
+                throw new Error('Invalid slot');
+              }
+              if (slots[index] !== null) {
+                throw new Error('Slot already filled');
+              }
+              slots[index] = current;
+              current = null;
+              placed += 1;
+              notify();
+            }
+
+            /** @param {(snap: ReturnType<typeof snapshot>) => void} listener */
+            function subscribe(listener) {
+              listeners.add(listener);
+              return () => listeners.delete(listener);
+            }
+
+            return Object.freeze({ snapshot, reveal, place, subscribe });
+          }
+
+          return {
+            meta: shared.moduleMeta(
+              'core',
+              'ready',
+              3,
+              'Game engine: seeded random, reveal, place, complete. No DOM.',
+            ),
+            createRng,
+            shuffle,
+            createGame,
+          };
+        });
+        /* ===== END MODULE: core ===== */
+
+        /* ===== MODULE: storage | target: src/storage/index.js ===== */
+        registry.define('storage', ['shared'], ({ shared }) => ({
+          meta: shared.moduleMeta(
+            'storage',
+            'planned',
+            8,
+            'Persistence, offline layer and pack downloads.',
+          ),
+        }));
+        /* ===== END MODULE: storage ===== */
+
+        /* ===== MODULE: camera | target: src/camera/index.js ===== */
+        registry.define('camera', ['shared'], ({ shared }) => {
+          /**
+           * Capture profile for budget phones: VGA at up to 30 fps, audio off. These are "ideal"
+           * hints, so a device that cannot match them still opens at its nearest mode.
+           */
+          const PROFILE = deepFreeze({
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            frameRate: { ideal: 24, max: 30 },
+          });
+
+          /** Friendly texts for every failure the player can meet. `retry` shows Try again. */
+          const ERRORS = deepFreeze({
+            insecure: {
+              title: 'Secure page needed',
+              message: 'The camera only works on a secure page. Open this app from its https:// address.',
+              retry: false,
+            },
+            unsupported: {
+              title: 'Camera not supported',
+              message: 'This browser cannot open the camera. Try the latest Chrome. You can still play without it.',
+              retry: false,
+            },
+            denied: {
+              title: 'Camera not allowed',
+              message:
+                'Tap Try again and choose Allow. If no prompt appears, tap the lock icon in the address bar and allow Camera.',
+              retry: true,
+            },
+            'not-found': {
+              title: 'No camera found',
+              message: 'This device has no camera the browser can use. You can still play without it.',
+              retry: true,
+            },
+            busy: {
+              title: 'Camera is busy',
+              message: 'Another app or tab may be using it. Close it, then tap Try again.',
+              retry: true,
+            },
+            settings: {
+              title: 'Camera settings not supported',
+              message: 'This camera could not open at the requested size. Tap Try again.',
+              retry: true,
+            },
+            ended: {
+              title: 'Camera stopped',
+              message: 'The camera was disconnected or taken by another app. Tap Try again.',
+              retry: true,
+            },
+            unknown: {
+              title: 'Camera problem',
+              message: 'The camera could not start. Tap Try again.',
+              retry: true,
+            },
+          });
+
+          /** Browser error name to error code. Names differ between browsers and versions. */
+          const ERROR_CODES = deepFreeze({
+            NotAllowedError: 'denied',
+            PermissionDeniedError: 'denied',
+            SecurityError: 'denied',
+            NotFoundError: 'not-found',
+            DevicesNotFoundError: 'not-found',
+            NotReadableError: 'busy',
+            TrackStartError: 'busy',
+            AbortError: 'busy',
+            OverconstrainedError: 'settings',
+            ConstraintNotSatisfiedError: 'settings',
+          });
+
+          /**
+           * @param {string} code key of ERRORS
+           * @param {string} [detail] the raw browser error name, kept for diagnostics
+           */
+          function describeError(code, detail = '') {
+            const known = Object.prototype.hasOwnProperty.call(ERRORS, code);
+            const info = ERRORS[known ? code : 'unknown'];
+            return Object.freeze({
+              code: known ? code : 'unknown',
+              title: info.title,
+              message: info.message,
+              retry: info.retry,
+              detail,
+            });
+          }
+
+          /** @param {any} error whatever getUserMedia rejected with */
+          function classifyError(error) {
+            const name = String((error && error.name) || '');
+            return describeError(ERROR_CODES[name] || 'unknown', name);
+          }
+
+          /**
+           * Checks whether the camera can be used at all, without asking for permission.
+           * @param {{mediaDevices?: any, secureContext?: boolean}} input
+           * @returns {{supported: boolean, code: string}}
+           */
+          function detectSupport({ mediaDevices, secureContext }) {
+            if (secureContext === false) {
+              return { supported: false, code: 'insecure' };
+            }
+            if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function') {
+              return { supported: false, code: 'unsupported' };
+            }
+            return { supported: true, code: '' };
+          }
+
+          /**
+           * Builds getUserMedia constraints. Front camera by default; audio is never requested.
+           * @param {{facing?: 'user'|'environment', exactFacing?: boolean, deviceId?: string|null}} [spec]
+           */
+          function buildConstraints({ facing = 'user', exactFacing = false, deviceId = null } = {}) {
+            const video = {
+              width: { ...PROFILE.width },
+              height: { ...PROFILE.height },
+              frameRate: { ...PROFILE.frameRate },
+            };
+            if (deviceId) {
+              video.deviceId = { exact: deviceId };
+            } else {
+              video.facingMode = exactFacing ? { exact: facing } : { ideal: facing };
+            }
+            return { audio: false, video };
+          }
+
+          /** @param {any} track */
+          function readSettings(track) {
+            const s = typeof track.getSettings === 'function' ? track.getSettings() : {};
+            return Object.freeze({
+              width: s.width || 0,
+              height: s.height || 0,
+              frameRate: s.frameRate || 0,
+              facingMode: s.facingMode || '',
+              deviceId: s.deviceId || '',
+              label: track.label || '',
+            });
+          }
+
+          /**
+           * Reads the camera permission state when the browser supports it.
+           * @param {any} [permissions] defaults to navigator.permissions
+           * @returns {Promise<'granted'|'denied'|'prompt'|'unknown'>}
+           */
+          async function queryPermission(permissions = window.navigator.permissions) {
+            try {
+              const status = await permissions.query({ name: 'camera' });
+              return status.state;
+            } catch (_error) {
+              return 'unknown';
+            }
+          }
+
+          /**
+           * Counts frames a playing video shows over a short window. Needs
+           * requestVideoFrameCallback; resolves null when the browser lacks it.
+           * @param {any} video
+           * @param {number} [windowMs]
+           * @returns {Promise<number|null>} frames per second
+           */
+          function measureFrameRate(video, windowMs = 1500) {
+            return new Promise((resolve) => {
+              if (!video || typeof video.requestVideoFrameCallback !== 'function') {
+                resolve(null);
+                return;
+              }
+              let frames = 0;
+              let first = 0;
+              let last = 0;
+              let done = false;
+              const finish = () => {
+                if (done) {
+                  return;
+                }
+                done = true;
+                resolve(frames > 1 && last > first ? ((frames - 1) * 1000) / (last - first) : 0);
+              };
+              const tick = (now) => {
+                if (done) {
+                  return;
+                }
+                if (!first) {
+                  first = now;
+                }
+                last = now;
+                frames += 1;
+                if (now - first >= windowMs) {
+                  finish();
+                } else {
+                  video.requestVideoFrameCallback(tick);
+                }
+              };
+              video.requestVideoFrameCallback(tick);
+              setTimeout(finish, windowMs + 1500);
+            });
+          }
+
+          /**
+           * Owns one camera stream. No DOM: the screen attaches `snapshot().stream` to a video.
+           * States: idle, starting, active, error. Every start/switch/stop bumps a token so a
+           * late answer from getUserMedia can never leave a stream running after stop().
+           * @param {{mediaDevices?: any, secureContext?: boolean}} options
+           */
+          function createController({ mediaDevices, secureContext = true }) {
+            const support = detectSupport({ mediaDevices, secureContext });
+            let state = 'idle';
+            let facing = 'user';
+            let stream = null;
+            let watchedTrack = null;
+            let settings = null;
+            let error = null;
+            let notice = '';
+            let switching = false;
+            let cameras = [];
+            let token = 0;
+            const listeners = new Set();
+
+            function snapshot() {
+              return Object.freeze({
+                state,
+                facing,
+                stream,
+                settings,
+                error,
+                notice,
+                switching,
+                supported: support.supported,
+                supportCode: support.code,
+                cameraCount: cameras.length,
+                canSwitch: state === 'active' && cameras.length > 1,
+              });
+            }
+
+            function emit() {
+              const snap = snapshot();
+              listeners.forEach((listener) => {
+                try {
+                  listener(snap);
+                } catch (listenerError) {
+                  console.error(listenerError);
+                }
+              });
+            }
+
+            function releaseStream() {
+              if (watchedTrack) {
+                watchedTrack.removeEventListener('ended', onTrackEnded);
+                watchedTrack = null;
+              }
+              if (stream) {
+                stream.getTracks().forEach((track) => track.stop());
+                stream = null;
+              }
+              settings = null;
+            }
+
+            function failWith(described) {
+              releaseStream();
+              state = 'error';
+              error = described;
+              switching = false;
+              emit();
+            }
+
+            function onTrackEnded() {
+              if (state !== 'active') {
+                return;
+              }
+              token += 1;
+              failWith(describeError('ended'));
+            }
+
+            /** @param {any} acquired a MediaStream @param {'user'|'environment'} requestedFacing */
+            function adopt(acquired, requestedFacing) {
+              const track = acquired.getVideoTracks()[0];
+              if (!track) {
+                acquired.getTracks().forEach((t) => t.stop());
+                throw Object.assign(new Error('The stream has no video track'), {
+                  name: 'NotFoundError',
+                });
+              }
+              stream = acquired;
+              watchedTrack = track;
+              track.addEventListener('ended', onTrackEnded);
+              settings = readSettings(track);
+              facing =
+                settings.facingMode === 'user' || settings.facingMode === 'environment'
+                  ? settings.facingMode
+                  : requestedFacing;
+            }
+
+            async function refreshCameras() {
+              try {
+                const list = await mediaDevices.enumerateDevices();
+                cameras = list.filter((d) => d.kind === 'videoinput').map((d) => d.deviceId);
+              } catch (_error) {
+                cameras = [];
+              }
+            }
+
+            /** Opens the camera; falls back to plain `video: true` if the profile is refused. */
+            async function open(spec) {
+              try {
+                return await mediaDevices.getUserMedia(buildConstraints(spec));
+              } catch (openError) {
+                if (classifyError(openError).code === 'settings') {
+                  return mediaDevices.getUserMedia({ audio: false, video: true });
+                }
+                throw openError;
+              }
+            }
+
+            /** @returns {Promise<boolean>} true when the camera is running */
+            async function start() {
+              if (state === 'starting' || state === 'active') {
+                return state === 'active';
+              }
+              if (!support.supported) {
+                failWith(describeError(support.code));
+                return false;
+              }
+              const myToken = ++token;
+              state = 'starting';
+              error = null;
+              notice = '';
+              switching = false;
+              emit();
+              let acquired;
+              try {
+                acquired = await open({ facing });
+              } catch (openError) {
+                if (myToken === token) {
+                  failWith(classifyError(openError));
+                }
+                return false;
+              }
+              if (myToken !== token) {
+                acquired.getTracks().forEach((t) => t.stop());
+                return false;
+              }
+              try {
+                adopt(acquired, facing);
+              } catch (adoptError) {
+                failWith(classifyError(adoptError));
+                return false;
+              }
+              await refreshCameras();
+              if (myToken !== token) {
+                return false;
+              }
+              if (!watchedTrack || watchedTrack.readyState === 'ended') {
+                failWith(describeError('ended'));
+                return false;
+              }
+              state = 'active';
+              emit();
+              return true;
+            }
+
+            /**
+             * Releases the camera. Safe to call in any state.
+             * @param {{notice?: string}} [options] a short message to show afterwards
+             */
+            function stop(options = {}) {
+              token += 1;
+              releaseStream();
+              state = 'idle';
+              error = null;
+              switching = false;
+              notice = options.notice || '';
+              emit();
+            }
+
+            /**
+             * Switches between front and back camera. The old stream is released first because
+             * many budget phones cannot open two cameras at once. If the new camera cannot be
+             * opened, the previous one is restored. @returns {Promise<boolean>} true if switched
+             */
+            async function switchCamera() {
+              if (state !== 'active' || cameras.length < 2) {
+                return false;
+              }
+              const myToken = ++token;
+              const previous = { facing, deviceId: settings ? settings.deviceId : '' };
+              const target = previous.facing === 'user' ? 'environment' : 'user';
+              const nextId = cameras[(cameras.indexOf(previous.deviceId) + 1) % cameras.length];
+              releaseStream();
+              state = 'starting';
+              switching = true;
+              notice = '';
+              error = null;
+              emit();
+
+              const attempts = [{ facing: target, exactFacing: true }];
+              if (nextId && nextId !== previous.deviceId) {
+                attempts.push({ facing: target, deviceId: nextId });
+              }
+              let lastError = null;
+              for (const spec of attempts) {
+                try {
+                  const acquired = await mediaDevices.getUserMedia(buildConstraints(spec));
+                  if (myToken !== token) {
+                    acquired.getTracks().forEach((t) => t.stop());
+                    return false;
+                  }
+                  adopt(acquired, target);
+                  await refreshCameras();
+                  if (myToken !== token) {
+                    return false;
+                  }
+                  state = 'active';
+                  switching = false;
+                  emit();
+                  return true;
+                } catch (attemptError) {
+                  if (myToken !== token) {
+                    return false;
+                  }
+                  lastError = attemptError;
+                  const code = classifyError(attemptError).code;
+                  if (code !== 'settings' && code !== 'not-found') {
+                    break;
+                  }
+                }
+              }
+
+              releaseStream();
+              try {
+                const restored = await mediaDevices.getUserMedia(
+                  buildConstraints({ facing: previous.facing, deviceId: previous.deviceId || null }),
+                );
+                if (myToken !== token) {
+                  restored.getTracks().forEach((t) => t.stop());
+                  return false;
+                }
+                adopt(restored, previous.facing);
+                await refreshCameras();
+                if (myToken !== token) {
+                  return false;
+                }
+                state = 'active';
+                switching = false;
+                notice = 'Could not switch cameras. Still using the previous one.';
+                emit();
+                return false;
+              } catch (restoreError) {
+                if (myToken === token) {
+                  failWith(classifyError(lastError || restoreError));
+                }
+                return false;
+              }
+            }
+
+            /** @param {(snap: ReturnType<typeof snapshot>) => void} listener */
+            function subscribe(listener) {
+              listeners.add(listener);
+              return () => listeners.delete(listener);
+            }
+
+            /** Stops the camera and forgets all listeners. Call when the screen goes away. */
+            function dispose() {
+              listeners.clear();
+              stop();
+              listeners.clear();
+            }
+
+            return Object.freeze({ support, snapshot, start, stop, switchCamera, subscribe, dispose });
+          }
+
+          return {
+            meta: shared.moduleMeta(
+              'camera',
+              'ready',
+              5,
+              'Live preview, start, stop, switch and friendly errors. Face tracking comes later.',
+            ),
+            PROFILE,
+            buildConstraints,
+            classifyError,
+            describeError,
+            detectSupport,
+            createController,
+            queryPermission,
+            measureFrameRate,
+          };
+        });
+        /* ===== END MODULE: camera ===== */
+
+        /* ===== MODULE: tracking | target: src/tracking/index.js ===== */
+        registry.define('tracking', ['shared'], ({ shared }) => ({
+          meta: shared.moduleMeta(
+            'tracking',
+            'planned',
+            5,
+            'Face and head tracking with automatic fallback tiers.',
+          ),
+        }));
+        /* ===== END MODULE: tracking ===== */
+
+        /* ===== MODULE: compositor | target: src/compositor/index.js ===== */
+        registry.define('compositor', ['shared'], ({ shared }) => ({
+          meta: shared.moduleMeta(
+            'compositor',
+            'planned',
+            6,
+            'Draws camera, head-anchored item and board on one canvas.',
+          ),
+        }));
+        /* ===== END MODULE: compositor ===== */
+
+        /* ===== MODULE: recorder | target: src/recorder/index.js ===== */
+        registry.define('recorder', ['shared'], ({ shared }) => ({
+          meta: shared.moduleMeta(
+            'recorder',
+            'planned',
+            6,
+            'Canvas recording, optional microphone, save and share.',
+          ),
+        }));
+        /* ===== END MODULE: recorder ===== */
+
+        /* ===== MODULE: results | target: src/results/index.js ===== */
+        registry.define('results', ['shared'], ({ shared }) => {
+          /**
+           * Builds an immutable result from a finished game.
+           * @param {{category: any, slots: readonly any[], createdAt?: Date}} input
+           */
+          function buildResult({ category, slots, createdAt = new Date() }) {
+            if (!category || !Array.isArray(slots) || slots.length === 0) {
+              throw new Error('A result needs a category and slots');
+            }
+            if (slots.some((item) => !item)) {
+              throw new Error('Cannot build a result from an unfinished ranking');
+            }
+            return deepFreeze({
+              categoryId: category.id,
+              categoryName: category.name,
+              icon: category.icon,
+              accent: category.accent,
+              createdAt: createdAt.toISOString(),
+              entries: slots.map((item, index) => ({
+                rank: index + 1,
+                itemId: item.id,
+                name: item.name,
+                image: item.image,
+              })),
+            });
+          }
+
+          /**
+           * Plain-text version of a result for sharing.
+           * @param {ReturnType<typeof buildResult>} result
+           * @param {string} [appName]
+           */
+          function toShareText(result, appName = shared.config.app.name) {
+            const lines = result.entries.map((entry) => `${entry.rank}. ${entry.name}`);
+            return [`${appName} · ${result.categoryName}`, '', ...lines].join('\n');
+          }
+
+          return {
+            meta: shared.moduleMeta(
+              'results',
+              'foundation',
+              7,
+              'Result list and share text. The image card comes in Step 7.',
+            ),
+            buildResult,
+            toShareText,
+          };
+        });
+        /* ===== END MODULE: results ===== */
+
+        /* ===== MODULE: ui | target: src/ui/index.js ===== */
+        registry.define(
+          'ui',
+          [
+            'shared',
+            'content',
+            'core',
+            'storage',
+            'camera',
+            'tracking',
+            'compositor',
+            'recorder',
+            'results',
+          ],
+          (deps) => {
+            const { shared, content, core, camera, results } = deps;
+            const { config } = shared;
+            const meta = shared.moduleMeta(
+              'ui',
+              'ready',
+              4,
+              'Home, play, result and diagnostics screens with routing.',
+            );
+
+            const MODULE_ORDER = [
+              'shared',
+              'content',
+              'core',
+              'storage',
+              'camera',
+              'tracking',
+              'compositor',
+              'recorder',
+              'results',
+              'ui',
+            ];
+
+            const SHARE_MESSAGES = {
+              shared: 'Shared.',
+              copied: 'Copied to clipboard.',
+              cancelled: '',
+              unavailable: 'Sharing is not available in this browser. Copy the list by hand.',
+            };
+
+            /* ---------- small DOM helpers ---------- */
+
+            /**
+             * Creates an element. Text is always set as textContent, never as HTML.
+             * @param {string} tag
+             * @param {Record<string, any>} [props] class, text, on<event> handlers, attributes
+             * @param {(Node|string|null|false|undefined)[]} [children]
+             */
+            function h(tag, props = {}, children = []) {
+              const element = document.createElement(tag);
+              for (const [key, value] of Object.entries(props)) {
+                if (key === 'class') {
+                  element.className = value;
+                } else if (key === 'text') {
+                  element.textContent = value;
+                } else if (key.startsWith('on') && typeof value === 'function') {
+                  element.addEventListener(key.slice(2), value);
+                } else if (value !== false && value != null) {
+                  element.setAttribute(key, value === true ? '' : String(value));
+                }
+              }
+              element.append(...children.filter((child) => child != null && child !== false));
+              return element;
+            }
+
+            /**
+             * @param {string} kind ok | bad | info | ready | foundation | planned
+             * @param {string} label
+             */
+            function chip(kind, label) {
+              return h('span', { class: `chip chip--${kind}`, text: label });
+            }
+
+            /**
+             * Converts #rrggbb to an rgba() string.
+             * @param {string} hex
+             * @param {number} alpha
+             */
+            function hexToRgba(hex, alpha) {
+              const value = parseInt(hex.slice(1), 16);
+              return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`;
+            }
+
+            /**
+             * Applies a category accent color to an element and everything inside it.
+             * @param {HTMLElement} element
+             * @param {string} accent
+             */
+            function applyAccent(element, accent) {
+              element.style.setProperty('--cat', accent);
+              element.style.setProperty('--cat-soft', hexToRgba(accent, 0.14));
+              element.style.setProperty('--cat-line', hexToRgba(accent, 0.45));
+            }
+
+            /* ---------- item images (extend IMAGE_RENDERERS for new image types) ---------- */
+
+            /** @param {{id: string, name: string}} item @param {string} sizeClass */
+            function monogram(item, sizeClass) {
+              const hue = content.hueFor(item.id);
+              const el = h('span', {
+                class: `avatar ${sizeClass}`.trim(),
+                'aria-hidden': 'true',
+                text: content.initials(item.name),
+              });
+              el.style.background = `linear-gradient(135deg, hsl(${hue}, 62%, 46%), hsl(${(hue + 40) % 360}, 62%, 34%))`;
+              return el;
+            }
+
+            const IMAGE_RENDERERS = {
+              text: monogram,
+              /** @param {any} item @param {string} sizeClass */
+              flag(item, sizeClass) {
+                const emoji = content.flagEmoji(item.image.code);
+                if (!emoji) {
+                  return monogram(item, sizeClass);
+                }
+                return h('span', {
+                  class: `avatar avatar--flag ${sizeClass}`.trim(),
+                  'aria-hidden': 'true',
+                  text: emoji,
+                });
+              },
+            };
+
+            /**
+             * @param {{id: string, name: string, image?: {type: string}}} item
+             * @param {boolean} [small]
+             */
+            function itemAvatar(item, small = false) {
+              const type = item.image && item.image.type;
+              const render = IMAGE_RENDERERS[type] || IMAGE_RENDERERS.text;
+              return render(item, small ? 'avatar--sm' : '');
+            }
+
+            /** Decorative head-and-shoulders outline where the camera preview will go. */
+            function personSilhouette() {
+              const ns = 'http://www.w3.org/2000/svg';
+              const svg = document.createElementNS(ns, 'svg');
+              svg.setAttribute('viewBox', '0 0 200 240');
+              svg.setAttribute('aria-hidden', 'true');
+              const head = document.createElementNS(ns, 'circle');
+              head.setAttribute('cx', '100');
+              head.setAttribute('cy', '72');
+              head.setAttribute('r', '46');
+              const body = document.createElementNS(ns, 'path');
+              body.setAttribute('d', 'M14 240 C14 170 58 140 100 140 C142 140 186 170 186 240 Z');
+              for (const part of [head, body]) {
+                part.setAttribute('fill', 'currentColor');
+                svg.append(part);
+              }
+              return svg;
+            }
+
+            /* ---------- shared screen parts ---------- */
+
+            /**
+             * Back button, title and optional trailing element.
+             * @param {string} title
+             * @param {{go: (path: string) => void}} env
+             * @param {Node} [trailing]
+             */
+            function topbar(title, env, trailing) {
+              return h('div', { class: 'topbar' }, [
+                h('button', {
+                  class: 'icon-btn',
+                  type: 'button',
+                  'aria-label': 'Back to home',
+                  'data-action': 'back',
+                  text: '←',
+                  onclick: () => env.go('/'),
+                }),
+                h('h2', {
+                  class: 'topbar__title',
+                  'data-screen-title': '',
+                  tabindex: -1,
+                  text: title,
+                }),
+                trailing,
+              ]);
+            }
+
+            /* ---------- HOME ---------- */
+
+            const HOW_IT_WORKS = [
+              ['Pick a category', 'Football, cricket, countries. More packs can be added later.'],
+              ['Reveal a random pick', 'One item at a time. You cannot skip or peek ahead.'],
+              ['Lock it into a slot', `Tap one of the ${config.game.slotCount} slots. Once placed, it is final.`],
+              ['Share your ranking', 'See all of them at the end and send the list to friends.'],
+            ];
+
+            /** @param {any} env */
+            function homeScreen(env) {
+              const cards = content.catalog.categories().map((category) => {
+                const card = h(
+                  'button',
+                  { class: 'cat', type: 'button', 'data-category': category.id },
+                  [
+                    h('span', { class: 'cat__icon', 'aria-hidden': 'true', text: category.icon }),
+                    h('span', { class: 'cat__body' }, [
+                      h('strong', { class: 'cat__name', text: category.name }),
+                      h('span', {
+                        class: 'muted',
+                        text: `${category.tagline} · ${category.itemCount} picks`,
+                      }),
+                    ]),
+                    h('span', { class: 'cat__go', 'aria-hidden': 'true', text: '›' }),
+                  ],
+                );
+                applyAccent(card, category.accent);
+                card.addEventListener('click', () => env.go(`/play/${category.id}`));
+                return card;
+              });
+
+              const element = h('section', { class: 'screen', 'data-screen': 'home' }, [
+                h('div', { class: 'hero' }, [
+                  h('h2', {
+                    class: 'hero__title',
+                    'data-screen-title': '',
+                    tabindex: -1,
+                    text: 'Rank blind. No take-backs.',
+                  }),
+                  h('p', {
+                    class: 'muted',
+                    text: `Reveal one random pick at a time and lock it into one of ${config.game.slotCount} slots before you see the next.`,
+                  }),
+                ]),
+                h('h3', { class: 'section-title', text: 'Pick a category' }),
+                h('div', { class: 'cats' }, cards),
+                h('h3', { class: 'section-title', text: 'How it works' }),
+                h(
+                  'ol',
+                  { class: 'steps' },
+                  HOW_IT_WORKS.map(([title, text], index) =>
+                    h('li', { class: 'step', 'data-how-step': index + 1 }, [
+                      h('span', { class: 'step__n', 'aria-hidden': 'true', text: String(index + 1) }),
+                      h('span', { class: 'step__body' }, [
+                        h('strong', { text: title }),
+                        h('span', { class: 'muted', text }),
+                      ]),
+                    ]),
+                  ),
+                ),
+                h('button', {
+                  class: 'link-btn',
+                  type: 'button',
+                  'data-action': 'diagnostics',
+                  text: 'Diagnostics',
+                  onclick: () => env.go('/diagnostics'),
+                }),
+              ]);
+              return { element };
+            }
+
+            /* ---------- PLAY ---------- */
+
+            /** @param {any} env @param {string} categoryId */
+            function playScreen(env, categoryId) {
+              const category = content.catalog.get(categoryId);
+              const slotCount = config.game.slotCount;
+              const game = core.createGame({ items: category.items, slotCount, rng: env.rng });
+
+              const progress = h('span', {
+                class: 'chip chip--info',
+                'data-progress': '',
+                text: `0 / ${slotCount}`,
+              });
+              const live = h('p', { class: 'sr-only', 'aria-live': 'polite', 'data-live': '' });
+              const stageCard = h('div', { class: 'stage__card', 'data-stage-card': '' });
+              const hint = h('p', { class: 'hint', 'data-hint': '' });
+              const primary = h('button', {
+                class: 'btn btn--block',
+                type: 'button',
+                'data-action': 'primary',
+              });
+
+              /** @type {{button: HTMLButtonElement, name: HTMLElement}[]} */
+              const slotEls = [];
+              const slotList = h('ol', { class: 'slots', 'aria-label': 'Ranking slots' });
+              for (let i = 0; i < slotCount; i += 1) {
+                const name = h('span', { class: 'slot__name' });
+                const button = h('button', { class: 'slot', type: 'button', 'data-slot': i }, [
+                  h('span', { class: 'slot__rank', 'aria-hidden': 'true', text: String(i + 1) }),
+                  name,
+                ]);
+                button.addEventListener('click', () => {
+                  const item = game.snapshot().current;
+                  try {
+                    game.place(i);
+                    live.textContent = `${item.name} placed in slot ${i + 1}.`;
+                  } catch (_error) {
+                    /* the button state already prevents invalid placements */
+                  }
+                });
+                slotEls.push({ button, name });
+                slotList.append(h('li', {}, [button]));
+              }
+
+              function finish() {
+                const snap = game.snapshot();
+                env.session.result = results.buildResult({
+                  category,
+                  slots: snap.slots,
+                  createdAt: env.now(),
+                });
+                env.go('/result');
+              }
+
+              primary.addEventListener('click', () => {
+                const phase = game.snapshot().phase;
+                if (phase === 'idle') {
+                  const item = game.reveal();
+                  live.textContent = `Revealed ${item.name}. Choose a slot.`;
+                } else if (phase === 'complete') {
+                  finish();
+                }
+              });
+
+              let lastPhase = 'idle';
+
+              /** @param {ReturnType<typeof game.snapshot>} snap */
+              function update(snap) {
+                progress.textContent = `${snap.placed} / ${snap.slotCount}`;
+
+                stageCard.className =
+                  snap.phase === 'revealed' && lastPhase !== 'revealed'
+                    ? 'stage__card pop'
+                    : 'stage__card';
+                if (snap.phase === 'revealed') {
+                  stageCard.replaceChildren(
+                    itemAvatar(snap.current),
+                    h('div', { class: 'stage__text' }, [
+                      h('strong', { 'data-stage-name': '', text: snap.current.name }),
+                      h('span', { class: 'muted', text: 'Choose a slot' }),
+                    ]),
+                  );
+                } else if (snap.phase === 'complete') {
+                  stageCard.replaceChildren(
+                    h('span', { class: 'avatar avatar--mystery', 'aria-hidden': 'true', text: '✓' }),
+                    h('div', { class: 'stage__text' }, [
+                      h('strong', { text: 'Ranking complete' }),
+                      h('span', { class: 'muted', text: `All ${snap.slotCount} placed` }),
+                    ]),
+                  );
+                } else {
+                  stageCard.replaceChildren(
+                    h('span', { class: 'avatar avatar--mystery', 'aria-hidden': 'true', text: '?' }),
+                    h('div', { class: 'stage__text' }, [
+                      h('strong', { text: 'Mystery pick' }),
+                      h('span', { class: 'muted', text: 'Tap Reveal' }),
+                    ]),
+                  );
+                }
+
+                slotEls.forEach(({ button, name }, index) => {
+                  const item = snap.slots[index];
+                  const filled = item !== null;
+                  const ready = snap.phase === 'revealed' && !filled;
+                  button.disabled = !ready;
+                  button.classList.toggle('slot--filled', filled);
+                  button.classList.toggle('slot--ready', ready);
+                  name.textContent = filled ? item.name : ready ? 'Place here' : 'Empty';
+                  button.setAttribute(
+                    'aria-label',
+                    `Slot ${index + 1}: ${filled ? item.name : ready ? 'empty, tap to place' : 'empty'}`,
+                  );
+                });
+
+                if (snap.phase === 'idle') {
+                  primary.disabled = false;
+                  primary.textContent = snap.drawn === 0 ? 'Reveal first pick' : 'Reveal next pick';
+                  hint.textContent = 'Picks are random and final once placed.';
+                } else if (snap.phase === 'revealed') {
+                  primary.disabled = true;
+                  primary.textContent = 'Tap a slot to place it';
+                  hint.textContent = `Where does ${snap.current.name} rank?`;
+                } else {
+                  primary.disabled = false;
+                  primary.textContent = 'See my ranking';
+                  hint.textContent = 'Every slot is filled.';
+                }
+                lastPhase = snap.phase;
+              }
+
+              update(game.snapshot());
+              game.subscribe(update);
+
+              /* --- camera: live preview, controls and lifecycle ---
+                 The camera is optional and never starts by itself: the player taps Start camera.
+                 The preview is a plain <video> (hardware decoded; no canvas copy, no network).
+                 The front camera preview is mirrored like a selfie. */
+              const controller = camera.createController({
+                mediaDevices: env.mediaDevices,
+                secureContext: env.secureContext,
+              });
+
+              const video = h('video', {
+                class: 'stage__video',
+                playsinline: true,
+                autoplay: true,
+                disablepictureinpicture: true,
+                'aria-label': 'Live camera preview',
+                'data-camera-video': '',
+              });
+              video.muted = true;
+              const silhouette = h('div', { class: 'stage__person' }, [personSilhouette()]);
+              const mediaLayer = h('div', { class: 'stage__media' }, [silhouette]);
+              const liveChip = h('span', {
+                class: 'stage__live',
+                'data-camera-live': '',
+                hidden: true,
+                text: '● Live',
+              });
+              const camLayer = h('div', { class: 'stage__cam', 'data-camera-layer': '' });
+              const camNote = h('p', { class: 'cam-note', 'data-camera-note': '', hidden: true });
+
+              /**
+               * @param {string} action data-action value
+               * @param {string} label visible text
+               * @param {() => void} onClick
+               * @param {{primary?: boolean, aria?: string}} [options]
+               */
+              function camButton(action, label, onClick, options = {}) {
+                return h('button', {
+                  class: `cam-btn${options.primary ? ' cam-btn--primary' : ''}`,
+                  type: 'button',
+                  'data-action': action,
+                  'aria-label': options.aria,
+                  text: label,
+                  onclick: onClick,
+                });
+              }
+
+              /**
+               * Compact status box over the stage: a title and at most one action. Longer
+               * explanations go in the note under the stage, so they can never cover the item card.
+               * @param {string} kind idle | starting | error (for tests and styling)
+               * @param {string} title
+               * @param {Node[]} actions
+               */
+              function camPanel(kind, title, actions) {
+                return h('div', { class: 'stage__panel', 'data-camera-panel': kind }, [
+                  h('div', { class: 'stage__panel-head' }, [
+                    h('strong', { class: 'stage__panel-title', text: title }),
+                    ...actions,
+                  ]),
+                ]);
+              }
+
+              /** @param {ReturnType<typeof controller.snapshot>} snap */
+              function cameraOverlay(snap) {
+                const start = () => controller.start();
+                if (snap.state === 'active') {
+                  return [
+                    h('div', { class: 'stage__controls' }, [
+                      snap.canSwitch
+                        ? camButton('camera-switch', 'Switch', () => controller.switchCamera(), {
+                            aria: 'Switch camera',
+                          })
+                        : null,
+                      camButton('camera-stop', 'Stop', () => controller.stop(), {
+                        aria: 'Stop camera',
+                      }),
+                    ]),
+                  ];
+                }
+                if (snap.state === 'starting') {
+                  return [
+                    camPanel('starting', snap.switching ? 'Switching camera…' : 'Starting camera…', [
+                      camButton('camera-cancel', 'Cancel', () => controller.stop()),
+                    ]),
+                  ];
+                }
+                if (snap.state === 'error' || !snap.supported) {
+                  const failure = snap.error || camera.describeError(snap.supportCode);
+                  return [
+                    camPanel(
+                      'error',
+                      failure.title,
+                      failure.retry
+                        ? [camButton('camera-retry', 'Try again', start, { primary: true })]
+                        : [],
+                    ),
+                  ];
+                }
+                return [
+                  camPanel('idle', 'Camera is off', [
+                    camButton('camera-start', 'Start camera', start, { primary: true }),
+                  ]),
+                ];
+              }
+
+              /** The explanation shown under the stage for the current camera state. */
+              function cameraNote(snap) {
+                if (snap.state === 'active') {
+                  return snap.notice;
+                }
+                if (snap.state === 'starting') {
+                  return snap.switching ? '' : 'Choose Allow if your browser asks.';
+                }
+                if (snap.state === 'error' || !snap.supported) {
+                  return (snap.error || camera.describeError(snap.supportCode)).message;
+                }
+                return snap.notice || 'Optional. Stays on this device, never uploaded.';
+              }
+
+              /** @param {Node|null} stream */
+              function attachPreview(stream) {
+                video.srcObject = stream;
+                const played = video.play();
+                if (played && typeof played.catch === 'function') {
+                  played.catch((playError) => {
+                    if (playError && playError.name === 'AbortError') {
+                      return;
+                    }
+                    controller.stop({
+                      notice: 'The preview could not start. Tap Start camera to try again.',
+                    });
+                  });
+                }
+              }
+
+              function detachPreview() {
+                if (video.srcObject) {
+                  video.pause();
+                  video.srcObject = null;
+                }
+              }
+
+              let lastCameraState = 'idle';
+
+              /** @param {ReturnType<typeof controller.snapshot>} snap */
+              function renderCamera(snap) {
+                const active = snap.state === 'active';
+                if (active) {
+                  if (video.srcObject !== snap.stream) {
+                    attachPreview(snap.stream);
+                  }
+                  video.classList.toggle('stage__video--mirror', snap.facing === 'user');
+                  if (video.parentNode !== mediaLayer) {
+                    mediaLayer.replaceChildren(video);
+                  }
+                } else {
+                  detachPreview();
+                  if (silhouette.parentNode !== mediaLayer) {
+                    mediaLayer.replaceChildren(silhouette);
+                  }
+                }
+                liveChip.hidden = !active;
+                camLayer.replaceChildren(...cameraOverlay(snap));
+                const note = cameraNote(snap);
+                camNote.textContent = note;
+                camNote.hidden = note === '';
+                camNote.classList.toggle('cam-note--error', snap.state === 'error' || !snap.supported);
+
+                if (snap.state !== lastCameraState) {
+                  if (active) {
+                    live.textContent = 'Camera is on.';
+                  } else if (snap.state === 'error') {
+                    live.textContent = `${snap.error.title}. ${snap.error.message}`;
+                  } else if (snap.state === 'idle' && lastCameraState !== 'idle') {
+                    live.textContent = 'Camera is off.';
+                  }
+                  lastCameraState = snap.state;
+                }
+              }
+
+              controller.subscribe(renderCamera);
+              renderCamera(controller.snapshot());
+
+              /** The camera must never keep running while the app is out of sight. */
+              function onVisibility() {
+                const state = controller.snapshot().state;
+                if (
+                  document.visibilityState === 'hidden' &&
+                  (state === 'active' || state === 'starting')
+                ) {
+                  controller.stop({ notice: 'Camera turned off while the app was in the background.' });
+                }
+              }
+              function onPageHide() {
+                controller.stop();
+              }
+              document.addEventListener('visibilitychange', onVisibility);
+              window.addEventListener('pagehide', onPageHide);
+
+              /** Called by the router before this screen is replaced. Releases the camera. */
+              function destroy() {
+                document.removeEventListener('visibilitychange', onVisibility);
+                window.removeEventListener('pagehide', onPageHide);
+                controller.dispose();
+                detachPreview();
+              }
+
+              const element = h('section', { class: 'screen play', 'data-screen': 'play' }, [
+                topbar(`${category.icon} ${category.name}`, env, progress),
+                h('div', { class: 'play__stage' }, [
+                  h('div', { class: 'stage' }, [mediaLayer, liveChip, stageCard, camLayer]),
+                  camNote,
+                ]),
+                h('div', { class: 'play__slots' }, [slotList]),
+                h('div', { class: 'actionbar' }, [primary, hint]),
+                live,
+              ]);
+              applyAccent(element, category.accent);
+              return { element, game, controller, destroy };
+            }
+
+            /* ---------- RESULT ---------- */
+
+            /**
+             * Shares text with the Web Share API, or copies it as a fallback.
+             * @param {{title: string, text: string}} payload
+             * @returns {Promise<'shared'|'copied'|'cancelled'|'unavailable'>}
+             */
+            async function shareText(payload) {
+              const nav = window.navigator;
+              if (typeof nav.share === 'function') {
+                try {
+                  await nav.share(payload);
+                  return 'shared';
+                } catch (error) {
+                  if (error && error.name === 'AbortError') {
+                    return 'cancelled';
+                  }
+                }
+              }
+              if (nav.clipboard && typeof nav.clipboard.writeText === 'function') {
+                try {
+                  await nav.clipboard.writeText(payload.text);
+                  return 'copied';
+                } catch (_error) {
+                  /* fall through to unavailable */
+                }
+              }
+              return 'unavailable';
+            }
+
+            /** @param {any} env */
+            function resultScreen(env) {
+              const result = env.session.result;
+              const status = h('p', {
+                class: 'status',
+                'aria-live': 'polite',
+                'data-share-status': '',
+              });
+              const shareBtn = h('button', {
+                class: 'btn btn--block',
+                type: 'button',
+                'data-action': 'share',
+                text: 'Share ranking',
+              });
+              shareBtn.addEventListener('click', async () => {
+                shareBtn.disabled = true;
+                const outcome = await env.share({
+                  title: `${config.app.name} · ${result.categoryName}`,
+                  text: results.toShareText(result),
+                });
+                status.textContent = SHARE_MESSAGES[outcome] || '';
+                shareBtn.disabled = false;
+              });
+
+              const element = h('section', { class: 'screen', 'data-screen': 'result' }, [
+                h('div', { class: 'hero' }, [
+                  h('h2', {
+                    class: 'hero__title',
+                    'data-screen-title': '',
+                    tabindex: -1,
+                    text: 'Your ranking',
+                  }),
+                  h('div', { class: 'chips' }, [
+                    chip('info', `${result.icon} ${result.categoryName}`),
+                    chip('ok', `${result.entries.length} picks`),
+                  ]),
+                ]),
+                h(
+                  'ol',
+                  { class: 'ranking' },
+                  result.entries.map((entry) =>
+                    h('li', { class: 'rank-row', 'data-rank-row': entry.rank }, [
+                      h('span', { class: 'rank-row__n', text: String(entry.rank) }),
+                      itemAvatar({ id: entry.itemId, name: entry.name, image: entry.image }, true),
+                      h('span', { class: 'rank-row__name', text: entry.name }),
+                    ]),
+                  ),
+                ),
+                h('div', { class: 'result-actions' }, [
+                  shareBtn,
+                  status,
+                  h('button', {
+                    class: 'btn btn--block btn--ghost',
+                    type: 'button',
+                    'data-action': 'again',
+                    text: 'Play again',
+                    onclick: () => env.go(`/play/${result.categoryId}`),
+                  }),
+                  h('button', {
+                    class: 'btn btn--block btn--ghost',
+                    type: 'button',
+                    'data-action': 'home',
+                    text: 'Home',
+                    onclick: () => env.go('/'),
+                  }),
+                ]),
+              ]);
+              applyAccent(element, result.accent);
+              return { element };
+            }
+
+            /* ---------- DIAGNOSTICS ---------- */
+
+            /**
+             * @param {string} label
+             * @param {boolean} value
+             * @param {boolean} [required] a missing optional capability is shown neutral
+             */
+            function capabilityRow(label, value, required = true) {
+              const chipEl = value ? chip('ok', 'Yes') : chip(required ? 'bad' : 'planned', 'No');
+              return h('li', { class: 'row' }, [h('span', { text: label }), chipEl]);
+            }
+
+            function environmentCard() {
+              const env = shared.detectEnv();
+              return h('section', { class: 'card', 'aria-labelledby': 'env-title' }, [
+                h('h3', { id: 'env-title', text: 'This browser' }),
+                h('ul', { class: 'list', 'data-env': '' }, [
+                  h('li', { class: 'row' }, [
+                    h('span', { text: 'Page address type' }),
+                    chip('info', env.protocol),
+                  ]),
+                  capabilityRow('Secure context (HTTPS)', env.secureContext),
+                  capabilityRow('Online', env.online, false),
+                  capabilityRow('Camera API', env.getUserMedia),
+                  capabilityRow('Video recording', env.mediaRecorder),
+                  capabilityRow('Canvas capture', env.captureStream),
+                  capabilityRow('Built-in face detector', env.faceDetector, false),
+                  capabilityRow('WebAssembly', env.webAssembly),
+                  capabilityRow('Local storage', env.localStorage),
+                  capabilityRow('IndexedDB', env.indexedDB),
+                ]),
+                h('p', {
+                  class: 'muted',
+                  text: 'Camera features need a secure context: HTTPS or localhost. Nothing here asks for permissions.',
+                }),
+                h('p', { class: 'mono', text: env.userAgent }),
+              ]);
+            }
+
+            /** @param {{name: string, status: string, step: number, description: string}} m */
+            function moduleRow(m) {
+              const label =
+                m.status === 'ready'
+                  ? 'Ready'
+                  : m.status === 'foundation'
+                    ? `Partial · Step ${m.step}`
+                    : `Step ${m.step}`;
+              return h('li', { class: 'row', 'data-module-row': m.name }, [
+                h('div', { class: 'row__main' }, [
+                  h('strong', { text: m.name }),
+                  h('span', { class: 'muted', text: m.description }),
+                ]),
+                chip(m.status, label),
+              ]);
+            }
+
+            function modulesCard() {
+              const metas = MODULE_ORDER.map((name) => (name === 'ui' ? meta : deps[name].meta));
+              return h('section', { class: 'card', 'aria-labelledby': 'modules-title' }, [
+                h('h3', { id: 'modules-title', text: 'Modules' }),
+                h('ul', { class: 'list' }, metas.map(moduleRow)),
+              ]);
+            }
+
+            /** @param {{runTests: () => Promise<any>}} hooks */
+            function testsCard(hooks) {
+              const output = h('div', { 'aria-live': 'polite', 'data-test-output': '' });
+              const button = h('button', { class: 'btn', type: 'button', text: 'Run self-tests' });
+
+              /** @param {{total: number, passed: number, failed: number, results: any[]}} result */
+              function show(result) {
+                const bad = result.failed > 0;
+                output.replaceChildren(
+                  h('p', {
+                    class: `summary summary--${bad ? 'bad' : 'ok'}`,
+                    text: `${result.passed} of ${result.total} tests passed`,
+                  }),
+                  h(
+                    'ul',
+                    { class: 'tests' },
+                    result.results.map((r) =>
+                      h('li', { class: r.ok ? 'test--ok' : 'test--bad' }, [
+                        h('span', { text: r.ok ? '✓' : '✗' }),
+                        h('span', { text: r.ok ? r.name : `${r.name}: ${r.error}` }),
+                      ]),
+                    ),
+                  ),
+                );
+              }
+
+              button.addEventListener('click', async () => {
+                button.disabled = true;
+                button.textContent = 'Running…';
+                try {
+                  show(await hooks.runTests());
+                } finally {
+                  button.disabled = false;
+                  button.textContent = 'Run self-tests';
+                }
+              });
+
+              const card = h('section', { class: 'card span-2', 'aria-labelledby': 'tests-title' }, [
+                h('h3', { id: 'tests-title', text: 'Automated self-tests' }),
+                h('p', {
+                  class: 'muted',
+                  text: 'Run on any device with a simulated camera, so they do not test your real camera (use the manual check above for that). They cover the module rules, game engine, packs, camera logic, screens and page. Add #tests to the address to run them on load.',
+                }),
+                button,
+                output,
+              ]);
+              return { card, show };
+            }
+
+            /** Resolves true when the video shows its first frame, false after the timeout. */
+            function waitForFirstFrame(videoEl, timeoutMs) {
+              return new Promise((resolve) => {
+                if (videoEl.readyState >= 2) {
+                  resolve(true);
+                  return;
+                }
+                const onData = () => done(true);
+                const timer = setTimeout(() => done(false), timeoutMs);
+                function done(value) {
+                  clearTimeout(timer);
+                  videoEl.removeEventListener('loadeddata', onData);
+                  resolve(value);
+                }
+                videoEl.addEventListener('loadeddata', onData);
+              });
+            }
+
+            /**
+             * Manual check that needs a real camera. It reports what the device actually
+             * delivers and proves the camera is released again. Runs only when tapped.
+             * @param {any} env
+             */
+            function cameraCheckCard(env) {
+              const status = h('p', {
+                class: 'muted',
+                'aria-live': 'polite',
+                'data-camera-check-status': '',
+                text: 'Not run yet.',
+              });
+              const results = h('ul', { class: 'list', 'data-camera-check-results': '' });
+              const preview = h('video', {
+                class: 'check-video',
+                playsinline: true,
+                autoplay: true,
+                hidden: true,
+                'aria-label': 'Camera check preview',
+                'data-camera-check-video': '',
+              });
+              preview.muted = true;
+              const button = h('button', {
+                class: 'btn',
+                type: 'button',
+                'data-action': 'camera-check',
+                text: 'Run camera check',
+              });
+              /** @type {ReturnType<typeof camera.createController>|null} */
+              let controller = null;
+              let running = false;
+              let disposed = false;
+
+              /** @param {string} label @param {string} value @param {'ok'|'bad'|'info'} [kind] */
+              function addRow(label, value, kind = 'info') {
+                results.append(
+                  h('li', { class: 'row' }, [
+                    h('span', { text: label }),
+                    h('span', { class: `row__value value--${kind}`, text: value }),
+                  ]),
+                );
+              }
+
+              async function run() {
+                if (running) {
+                  return;
+                }
+                running = true;
+                button.disabled = true;
+                button.textContent = 'Checking…';
+                results.replaceChildren();
+                status.textContent = 'Opening the camera. Choose Allow if your browser asks.';
+                controller = camera.createController({
+                  mediaDevices: env.mediaDevices,
+                  secureContext: env.secureContext,
+                });
+                let stream = null;
+                try {
+                  const secure = env.secureContext !== false;
+                  addRow('Secure page (HTTPS)', secure ? 'Yes' : 'No', secure ? 'ok' : 'bad');
+                  addRow('Permission before check', await camera.queryPermission(env.permissions));
+                  const openedAt = performance.now();
+                  const opened = await controller.start();
+                  const snap = controller.snapshot();
+                  if (disposed) {
+                    return;
+                  }
+                  if (!opened) {
+                    const failure = snap.error || camera.describeError(snap.supportCode);
+                    addRow('Result', failure.title, 'bad');
+                    addRow('What to do', failure.message);
+                    if (failure.detail) {
+                      addRow('Browser error', failure.detail);
+                    }
+                    status.textContent = 'The camera could not be opened.';
+                    return;
+                  }
+                  stream = snap.stream;
+                  addRow(
+                    'Camera opened in',
+                    `${Math.round(performance.now() - openedAt)} ms (includes any permission prompt)`,
+                    'ok',
+                  );
+                  preview.classList.toggle('check-video--mirror', snap.facing === 'user');
+                  preview.hidden = false;
+                  preview.srcObject = stream;
+                  const playedAt = performance.now();
+                  const played = preview.play();
+                  if (played && typeof played.catch === 'function') {
+                    played.catch(() => {});
+                  }
+                  const gotFrame = await waitForFirstFrame(preview, 6000);
+                  addRow(
+                    'First video frame',
+                    gotFrame ? `${Math.round(performance.now() - playedAt)} ms` : 'No frame within 6 seconds',
+                    gotFrame ? 'ok' : 'bad',
+                  );
+                  const s = snap.settings;
+                  const width = preview.videoWidth || s.width;
+                  const height = preview.videoHeight || s.height;
+                  addRow('Picture size', width && height ? `${width} × ${height}` : 'unknown');
+                  addRow(
+                    'Reported frame rate',
+                    s.frameRate ? `${Math.round(s.frameRate)} fps` : 'not reported',
+                  );
+                  if (gotFrame) {
+                    const fps = await camera.measureFrameRate(preview, env.fpsWindowMs || 1500);
+                    addRow(
+                      'Measured frame rate',
+                      fps === null ? 'not supported by this browser' : `${fps.toFixed(1)} fps`,
+                      fps === null ? 'info' : fps >= 20 ? 'ok' : fps >= 12 ? 'info' : 'bad',
+                    );
+                  }
+                  addRow(
+                    'Camera in use',
+                    `${snap.facing === 'user' ? 'front' : 'back'}${s.label ? ` · ${s.label}` : ''}`,
+                  );
+                  addRow('Cameras found', String(snap.cameraCount));
+                  addRow('Switch camera available', snap.canSwitch ? 'Yes' : 'No');
+                } catch (checkError) {
+                  addRow('Unexpected error', String((checkError && checkError.message) || checkError), 'bad');
+                } finally {
+                  controller.stop();
+                  preview.pause();
+                  preview.srcObject = null;
+                  preview.hidden = true;
+                  if (stream) {
+                    const released = stream.getTracks().every((track) => track.readyState === 'ended');
+                    addRow('Camera released afterwards', released ? 'Yes' : 'No', released ? 'ok' : 'bad');
+                  }
+                  if (!status.textContent.startsWith('The camera could not')) {
+                    status.textContent = 'Check finished. The camera is off.';
+                  }
+                  button.disabled = false;
+                  button.textContent = 'Run camera check';
+                  running = false;
+                }
+              }
+
+              button.addEventListener('click', run);
+
+              /** Releases the camera if the player leaves Diagnostics mid-check. */
+              function dispose() {
+                disposed = true;
+                if (controller) {
+                  controller.dispose();
+                }
+                preview.srcObject = null;
+              }
+
+              const card = h(
+                'section',
+                { class: 'card span-2', 'data-camera-check': '', 'aria-labelledby': 'camcheck-title' },
+                [
+                  h('h3', { id: 'camcheck-title', text: 'Real camera check (manual)' }),
+                  h('p', {
+                    class: 'muted',
+                    text: 'Needs a real camera, so it only runs when you tap the button. It opens your camera, measures what the phone delivers, then turns the camera off. Nothing is recorded or uploaded.',
+                  }),
+                  button,
+                  status,
+                  preview,
+                  results,
+                ],
+              );
+              return { card, dispose };
+            }
+
+            /** @param {any} env @param {{autorunTests?: boolean}} route */
+            function diagnosticsScreen(env, route) {
+              const tests = testsCard(env.hooks);
+              const cameraCheck = cameraCheckCard(env);
+              const element = h('section', { class: 'screen', 'data-screen': 'diagnostics' }, [
+                topbar('Diagnostics', env),
+                h('div', { class: 'grid' }, [
+                  modulesCard(),
+                  environmentCard(),
+                  cameraCheck.card,
+                  tests.card,
+                ]),
+              ]);
+              const afterMount = route.autorunTests
+                ? async () => tests.show(await env.hooks.runTests())
+                : undefined;
+              return { element, afterMount, destroy: cameraCheck.dispose };
+            }
+
+            /* ---------- routing ---------- */
+
+            /**
+             * Turns a location hash into a route. Never throws.
+             * @param {string} hash
+             * @returns {{name: 'home'|'play'|'result'|'diagnostics', categoryId?: string, autorunTests?: boolean}}
+             */
+            function parseRoute(hash) {
+              const path = String(hash || '').replace(/^#/, '');
+              if (path === 'tests') {
+                return { name: 'diagnostics', autorunTests: true };
+              }
+              const parts = path.split('/').filter(Boolean);
+              if (parts[0] === 'play' && parts[1]) {
+                let categoryId = parts[1];
+                try {
+                  categoryId = decodeURIComponent(parts[1]);
+                } catch (_error) {
+                  /* keep the raw segment; the catalog lookup will reject it */
+                }
+                return { name: 'play', categoryId };
+              }
+              if (parts[0] === 'result') {
+                return { name: 'result' };
+              }
+              if (parts[0] === 'diagnostics') {
+                return { name: 'diagnostics', autorunTests: false };
+              }
+              if (parts[0] === 'tests') {
+                return { name: 'diagnostics', autorunTests: true };
+              }
+              return { name: 'home' };
+            }
+
+            /** Replaces routes that cannot be shown (unknown category, no result yet) with home. */
+            function resolveRoute(route, session) {
+              if (route.name === 'play' && !content.catalog.get(route.categoryId)) {
+                return { name: 'home' };
+              }
+              if (route.name === 'result' && !session.result) {
+                return { name: 'home' };
+              }
+              return route;
+            }
+
+            /** @param {{name: string}} route @param {any} env */
+            function buildScreen(route, env) {
+              switch (route.name) {
+                case 'play':
+                  return playScreen(env, route.categoryId);
+                case 'result':
+                  return resultScreen(env);
+                case 'diagnostics':
+                  return diagnosticsScreen(env, route);
+                default:
+                  return homeScreen(env);
+              }
+            }
+
+            /**
+             * Builds a screen without touching the live page (used by tests).
+             * @param {any} route
+             * @param {Record<string, any>} [overrides] replaces parts of the screen environment
+             */
+            function previewScreen(route, overrides = {}) {
+              const env = Object.assign(
+                {
+                  go() {},
+                  session: { result: null },
+                  hooks: {
+                    runTests: async () => ({ total: 0, passed: 0, failed: 0, results: [] }),
+                  },
+                  rng: Math.random,
+                  now: () => new Date(),
+                  share: async () => 'unavailable',
+                  // Tests never touch the real camera unless they pass their own mediaDevices.
+                  mediaDevices: null,
+                  secureContext: true,
+                  permissions: null,
+                  fpsWindowMs: 1500,
+                },
+                overrides,
+              );
+              return buildScreen(resolveRoute(route, env.session), env);
+            }
+
+            /**
+             * Renders the app shell into root and starts the router.
+             * @param {HTMLElement} root
+             * @param {{runTests: () => Promise<any>}} hooks
+             */
+            function mount(root, hooks) {
+              const { app } = config;
+              const session = { result: null };
+              const main = h('main', { class: 'main', id: 'main' });
+              let currentName = 'home';
+              /** @type {{destroy?: () => void}|null} */
+              let currentScreen = null;
+
+              function render() {
+                const requested = parseRoute(window.location.hash);
+                const route = resolveRoute(requested, session);
+                if (route.name !== requested.name) {
+                  window.history.replaceState(null, '', '#/');
+                }
+                // Release whatever the old screen holds (the camera) before building the next one.
+                if (currentScreen && currentScreen.destroy) {
+                  currentScreen.destroy();
+                }
+                currentScreen = null;
+                try {
+                  const built = buildScreen(route, env);
+                  currentScreen = built;
+                  main.replaceChildren(built.element);
+                  root.dataset.route = route.name;
+                  currentName = route.name;
+                  window.scrollTo(0, 0);
+                  const title = built.element.querySelector('[data-screen-title]');
+                  if (title) {
+                    title.focus({ preventScroll: true });
+                  }
+                  if (built.afterMount) {
+                    built.afterMount();
+                  }
+                } catch (error) {
+                  window.__BR_RENDER_ERROR__ = String((error && error.message) || error);
+                  main.replaceChildren(
+                    h('div', { class: 'fatal' }, [
+                      h('h2', { text: 'This screen could not be shown' }),
+                      h('pre', { text: window.__BR_RENDER_ERROR__ }),
+                      h('button', {
+                        class: 'btn',
+                        type: 'button',
+                        text: 'Back to home',
+                        onclick: () => go('/'),
+                      }),
+                    ]),
+                  );
+                }
+              }
+
+              /** @param {string} path e.g. '/play/football' */
+              function go(path) {
+                const target = `#${path}`;
+                if (window.location.hash === target) {
+                  render();
+                } else {
+                  window.location.hash = target;
+                }
+              }
+
+              const env = {
+                go,
+                session,
+                hooks,
+                rng: Math.random,
+                now: () => new Date(),
+                share: shareText,
+                mediaDevices: window.navigator.mediaDevices,
+                secureContext: window.isSecureContext,
+                permissions: window.navigator.permissions,
+                fpsWindowMs: 1500,
+              };
+
+              root.replaceChildren(
+                h('header', { class: 'header' }, [
+                  h('div', { class: 'brand' }, [
+                    h('span', {
+                      class: 'brand__mark',
+                      'aria-hidden': 'true',
+                      text: String(config.game.slotCount),
+                    }),
+                    h('div', {}, [
+                      h('h1', { class: 'title', text: app.name }),
+                      h('p', { class: 'tagline', text: 'Blind ranking and challenge' }),
+                    ]),
+                  ]),
+                ]),
+                main,
+                h('footer', {
+                  class: 'footer',
+                  'data-footer': '',
+                  text: `v${app.version} · ${app.phase} · build ${app.buildDate.replace(/-/g, '‑')}`,
+                }),
+              );
+              window.addEventListener('hashchange', render);
+              render();
+
+              return Object.freeze({ go, render, currentScreen: () => currentName });
+            }
+
+            return { meta, mount, previewScreen, parseRoute, hexToRgba };
+          },
+        );
+        /* ===== END MODULE: ui ===== */
+
+        /* ===== TESTS (becomes tests/*.js). Add tests for every phase; never delete any. ===== */
+
+        /** @type {{name: string, run: () => (void|Promise<void>)}[]} */
+        const TESTS = [];
+
+        /**
+         * @param {string} name
+         * @param {() => (void|Promise<void>)} run
+         */
+        function test(name, run) {
+          TESTS.push({ name, run });
+        }
+
+        /**
+         * @param {unknown} condition
+         * @param {string} [message]
+         */
+        function assert(condition, message = 'Assertion failed') {
+          if (!condition) {
+            throw new Error(message);
+          }
+        }
+
+        /**
+         * @param {unknown} actual
+         * @param {unknown} expected
+         * @param {string} [message]
+         */
+        function assertEqual(actual, expected, message = 'Values differ') {
+          if (actual !== expected) {
+            throw new Error(
+              `${message}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
+            );
+          }
+        }
+
+        /**
+         * @param {() => void} fn
+         * @param {RegExp} pattern the error message must match
+         */
+        function assertThrows(fn, pattern) {
+          let caught = null;
+          try {
+            fn();
+          } catch (error) {
+            caught = error;
+          }
+          assert(caught, 'Expected the function to throw');
+          assert(
+            pattern.test(String(caught && caught.message)),
+            `Unexpected error message: ${caught && caught.message}`,
+          );
+        }
+
+        const stub = () => ({});
+        const nextTick = () => new Promise((resolve) => setTimeout(resolve, 0));
+        const names = (list) => list.map((entry) => entry.name);
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        /** Polls until `check()` returns something truthy; throws after `ms`. */
+        async function waitFor(check, what, ms = 2000) {
+          const end = Date.now() + ms;
+          while (!check()) {
+            if (Date.now() > end) {
+              throw new Error(`Timed out waiting for ${what}`);
+            }
+            await sleep(10);
+          }
+        }
+
+        /** @param {MediaStream} stream true when every track has ended */
+        const streamEnded = (stream) => stream.getTracks().every((t) => t.readyState === 'ended');
+
+        /**
+         * A SIMULATED camera for automated tests. getUserMedia returns a real MediaStream made
+         * from a tiny canvas, so stop(), readyState and the "ended" event behave like a real
+         * camera track. It says nothing about real hardware, drivers or permission prompts:
+         * those are covered only by the manual camera check in Diagnostics.
+         * @param {{cameras?: number, delay?: number}} [options]
+         */
+        function makeFakeMediaDevices({ cameras = 2, delay = 0 } = {}) {
+          const failures = [];
+          const calls = [];
+          const streams = [];
+          const devices = Array.from({ length: cameras }, (_, i) => ({
+            kind: 'videoinput',
+            deviceId: `cam-${i}`,
+            label: i === 0 ? 'Front test camera' : `Back test camera ${i}`,
+          }));
+          const facingOf = (index) => (index === 0 ? 'user' : 'environment');
+          const fail = (name) => new DOMException(`Simulated ${name}`, name);
+
+          return {
+            calls,
+            streams,
+            /** Queues browser error names for the next getUserMedia calls. */
+            failNext(...errorNames) {
+              failures.push(...errorNames);
+            },
+            async getUserMedia(constraints) {
+              calls.push(constraints);
+              if (delay) {
+                await sleep(delay);
+              }
+              const queued = failures.shift();
+              if (queued) {
+                throw fail(queued);
+              }
+              const video = constraints.video;
+              let index = 0;
+              if (video && typeof video === 'object') {
+                if (video.deviceId) {
+                  index = devices.findIndex((d) => d.deviceId === video.deviceId.exact);
+                  if (index < 0) {
+                    throw fail('NotFoundError');
+                  }
+                } else if (video.facingMode) {
+                  const wanted = video.facingMode.exact || video.facingMode.ideal;
+                  const found = devices.findIndex((_, i) => facingOf(i) === wanted);
+                  if (found < 0 && video.facingMode.exact) {
+                    throw fail('OverconstrainedError');
+                  }
+                  index = Math.max(found, 0);
+                }
+              }
+              const canvas = document.createElement('canvas');
+              canvas.width = 64;
+              canvas.height = 48;
+              const context = canvas.getContext('2d');
+              let hue = 0;
+              const draw = () => {
+                hue = (hue + 20) % 360;
+                context.fillStyle = `hsl(${hue}, 60%, 50%)`;
+                context.fillRect(0, 0, 64, 48);
+              };
+              draw();
+              const timer = setInterval(draw, 40);
+              const stream = canvas.captureStream(15);
+              const track = stream.getVideoTracks()[0];
+              const settings = {
+                width: 640,
+                height: 480,
+                frameRate: 15,
+                facingMode: facingOf(index),
+                deviceId: devices[index].deviceId,
+              };
+              track.getSettings = () => settings;
+              const realStop = track.stop.bind(track);
+              track.stop = () => {
+                clearInterval(timer);
+                realStop();
+              };
+              streams.push(stream);
+              return stream;
+            },
+            async enumerateDevices() {
+              return devices.map((d) => ({ ...d }));
+            },
+          };
+        }
+
+        /** A minimal valid pack for tests. */
+        function samplePack(overrides = {}) {
+          return {
+            schema: 1,
+            id: 'demo',
+            version: 1,
+            name: 'Demo',
+            items: Array.from({ length: 12 }, (_, i) => ({ id: `item-${i}`, name: `Item ${i}` })),
+            ...overrides,
+          };
+        }
+
+        // --- kernel ---
+        test('registry rejects an unknown module name', () => {
+          const sandbox = createRegistry({ a: [] });
+          assertThrows(() => sandbox.define('zzz', [], stub), /Unknown module/);
+        });
+
+        test('registry rejects a duplicate definition', () => {
+          const sandbox = createRegistry({ a: [] });
+          sandbox.define('a', [], stub);
+          assertThrows(() => sandbox.define('a', [], stub), /already defined/);
+        });
+
+        test('registry rejects a dependency the rules do not allow', () => {
+          const sandbox = createRegistry({ a: [], b: [] });
+          assertThrows(() => sandbox.define('b', ['a'], stub), /must not depend on "a"/);
+        });
+
+        test('registry injects only the declared dependencies', () => {
+          const sandbox = createRegistry({ a: [], b: ['a'], c: [] });
+          let received = null;
+          sandbox.define('a', [], () => ({ value: 1 }));
+          sandbox.define('c', [], () => ({ value: 3 }));
+          sandbox.define('b', ['a'], (deps) => {
+            received = Object.keys(deps);
+            return {};
+          });
+          sandbox.boot();
+          assertEqual(JSON.stringify(received), JSON.stringify(['a']), 'Injected keys');
+        });
+
+        test('registry freezes module APIs', () => {
+          const api = registry.get('shared');
+          assert(Object.isFrozen(api), 'shared API should be frozen');
+          assertThrows(() => {
+            api.config = null;
+          }, /read only|Cannot assign|frozen/i);
+        });
+
+        test('registry detects circular dependencies', () => {
+          const sandbox = createRegistry({ a: ['b'], b: ['a'] });
+          sandbox.define('a', ['b'], stub);
+          sandbox.define('b', ['a'], stub);
+          assertThrows(() => sandbox.boot(), /Circular dependency/);
+        });
+
+        test('registry reports a missing module at boot', () => {
+          const sandbox = createRegistry({ a: [], b: [] });
+          sandbox.define('a', [], stub);
+          assertThrows(() => sandbox.boot(), /"b" is not defined/);
+        });
+
+        test('registry requires factories to return an object', () => {
+          const sandbox = createRegistry({ a: [] });
+          sandbox.define('a', [], () => 5);
+          assertThrows(() => sandbox.boot(), /must return an object/);
+        });
+
+        // --- architecture ---
+        test('all ten modules are defined and boot', () => {
+          const defined = registry.list().map((m) => m.name);
+          assertEqual(defined.length, 10, 'Module count');
+          for (const name of Object.keys(ARCHITECTURE_RULES)) {
+            assert(defined.includes(name), `Module "${name}" missing`);
+            assert(registry.get(name).meta.name === name, `Module "${name}" has wrong meta`);
+          }
+        });
+
+        test('architecture rules are acyclic and reference only known modules', () => {
+          const fresh = createRegistry(ARCHITECTURE_RULES);
+          for (const [name, deps] of Object.entries(ARCHITECTURE_RULES)) {
+            for (const dep of deps) {
+              assert(dep in ARCHITECTURE_RULES, `"${name}" depends on unknown "${dep}"`);
+            }
+            fresh.define(name, [...deps], stub);
+          }
+          fresh.boot();
+        });
+
+        test('core cannot depend on camera, and shared depends on nothing', () => {
+          const fresh = createRegistry(ARCHITECTURE_RULES);
+          assertThrows(
+            () => fresh.define('core', ['shared', 'content', 'camera'], stub),
+            /must not depend on "camera"/,
+          );
+          assertEqual(ARCHITECTURE_RULES.shared.length, 0, 'shared dependency count');
+        });
+
+        test('the real modules declare only dependencies their rules allow', () => {
+          for (const { name, deps } of registry.list()) {
+            for (const dep of deps) {
+              assert(ARCHITECTURE_RULES[name].includes(dep), `${name} -> ${dep} not allowed`);
+            }
+          }
+        });
+
+        // --- shared ---
+        test('config has the agreed values and is frozen', () => {
+          const { config } = registry.get('shared');
+          assertEqual(config.game.slotCount, 10, 'Slot count');
+          assertEqual(config.platform.minAndroid, 10, 'Minimum Android');
+          assert(/^\d+\.\d+\.\d+$/.test(config.app.version), 'Version should be semver');
+          assertThrows(() => {
+            config.game.slotCount = 5;
+          }, /read only|Cannot assign|frozen/i);
+        });
+
+        test('moduleMeta rejects an invalid status', () => {
+          const { moduleMeta } = registry.get('shared');
+          assertThrows(() => moduleMeta('x', 'done', 1, 'x'), /Invalid module status/);
+        });
+
+        test('detectEnv returns booleans and survives a hostile window', () => {
+          const { detectEnv } = registry.get('shared');
+          const hostile = {
+            get location() {
+              throw new Error('blocked');
+            },
+            get navigator() {
+              throw new Error('blocked');
+            },
+            get isSecureContext() {
+              throw new Error('blocked');
+            },
+            get indexedDB() {
+              throw new Error('blocked');
+            },
+          };
+          const env = detectEnv(hostile);
+          assertEqual(env.secureContext, false, 'secureContext on hostile window');
+          assertEqual(env.protocol, 'unknown', 'protocol on hostile window');
+          const real = detectEnv(window);
+          for (const key of [
+            'secureContext',
+            'online',
+            'getUserMedia',
+            'mediaRecorder',
+            'captureStream',
+            'faceDetector',
+            'webAssembly',
+            'localStorage',
+            'indexedDB',
+          ]) {
+            assertEqual(typeof real[key], 'boolean', `env.${key} type`);
+          }
+        });
+
+        // --- content ---
+        test('the bundled packs load in order: football, cricket, countries', () => {
+          const { catalog } = registry.get('content');
+          const categories = catalog.categories();
+          assertEqual(
+            categories.map((c) => c.id).join(','),
+            'football,cricket,countries',
+            'Category order',
+          );
+          for (const category of categories) {
+            assert(category.itemCount >= 30, `${category.id} should have at least 30 picks`);
+            assert(/^#[0-9a-f]{6}$/i.test(category.accent), `${category.id} accent`);
+          }
+        });
+
+        test('every bundled item has a unique id, a name and a known image shape', () => {
+          const { catalog } = registry.get('content');
+          for (const { id } of catalog.categories()) {
+            const pack = catalog.get(id);
+            const seen = new Set();
+            for (const item of pack.items) {
+              assert(!seen.has(item.id), `${id}: duplicate id ${item.id}`);
+              seen.add(item.id);
+              assert(item.name.length > 0, `${id}: empty name`);
+              assert(typeof item.image.type === 'string', `${id}/${item.id}: image type`);
+            }
+          }
+          const flags = catalog.get('countries').items;
+          assert(flags.every((i) => i.image.type === 'flag'), 'countries use flags');
+          assert(catalog.get('football').items.every((i) => i.image.type === 'text'), 'football text');
+        });
+
+        test('validatePack accepts a valid pack and rejects broken ones', () => {
+          const { validatePack } = registry.get('content');
+          validatePack(samplePack());
+          const bad = [
+            [samplePack({ schema: 2 }), /schema/],
+            [samplePack({ items: samplePack().items.slice(0, 9) }), /at least 10/],
+            [samplePack({ name: '' }), /name is required/],
+            [samplePack({ accent: 'red' }), /accent/],
+            [samplePack({ id: 'Bad Id' }), /slug/],
+            [
+              samplePack({
+                items: [...samplePack().items.slice(0, 11), { id: 'item-0', name: 'Again' }],
+              }),
+              /repeats id/,
+            ],
+            [
+              samplePack({
+                items: [...samplePack().items.slice(0, 11), { id: 'f', name: 'F', image: { type: 'flag' } }],
+              }),
+              /2-letter code/,
+            ],
+          ];
+          for (const [pack, pattern] of bad) {
+            assertThrows(() => validatePack(pack), pattern);
+          }
+        });
+
+        test('a catalog can register new packs and only accepts newer versions', () => {
+          const { createCatalog } = registry.get('content');
+          const catalog = createCatalog();
+          catalog.register(samplePack());
+          assertEqual(catalog.categories().length, 1, 'Category count');
+          assertThrows(() => catalog.register(samplePack()), /already installed/);
+          catalog.register(samplePack({ version: 2, name: 'Demo 2' }));
+          assertEqual(catalog.get('demo').name, 'Demo 2', 'Upgraded pack name');
+          const item = catalog.get('demo').items[0];
+          assertEqual(item.image.type, 'text', 'Default image type');
+          assert(Object.isFrozen(item), 'Items should be frozen');
+          assertEqual(catalog.get('missing'), null, 'Unknown pack');
+        });
+
+        test('image helpers: flags, initials and stable hues', () => {
+          const { flagEmoji, initials, hueFor } = registry.get('content');
+          assertEqual(Array.from(flagEmoji('bd')).length, 2, 'Flag emoji length');
+          assertEqual(flagEmoji('Bangladesh'), '', 'Invalid flag code');
+          assertEqual(initials('Lionel Messi'), 'LM', 'Two words');
+          assertEqual(initials('Pelé'), 'P', 'One word');
+          assertEqual(initials('Son Heung-min'), 'SH', 'Hyphenated name');
+          assertEqual(initials('  '), '?', 'Blank name');
+          assertEqual(hueFor('messi'), hueFor('messi'), 'Hue is stable');
+          assert(hueFor('messi') >= 0 && hueFor('messi') < 360, 'Hue range');
+        });
+
+        // --- core ---
+        test('the seeded generator repeats for a seed and differs between seeds', () => {
+          const { createRng } = registry.get('core');
+          const a = createRng(42);
+          const b = createRng(42);
+          const c = createRng(43);
+          const first = [a(), a(), a()];
+          assertEqual(JSON.stringify(first), JSON.stringify([b(), b(), b()]), 'Same seed');
+          assert(first[0] !== c(), 'Different seed');
+          assert(first.every((n) => n >= 0 && n < 1), 'Range');
+        });
+
+        test('shuffle keeps every element and does not change the input', () => {
+          const { shuffle, createRng } = registry.get('core');
+          const input = Array.from({ length: 20 }, (_, i) => i);
+          const out = shuffle(input, createRng(1));
+          assertEqual(out.length, 20, 'Length');
+          assertEqual([...out].sort((x, y) => x - y).join(','), input.join(','), 'Same elements');
+          assertEqual(input.join(','), Array.from({ length: 20 }, (_, i) => i).join(','), 'Input intact');
+        });
+
+        test('a game rejects too few items', () => {
+          const { createGame } = registry.get('core');
+          assertThrows(() => createGame({ items: [1, 2, 3] }), /at least 10 items/);
+        });
+
+        test('a full game fills every slot once with distinct items from the pool', () => {
+          const { createGame, createRng } = registry.get('core');
+          const pool = registry.get('content').catalog.get('football').items;
+          const game = createGame({ items: pool, rng: createRng(9) });
+          const order = [4, 0, 9, 2, 7, 1, 8, 3, 6, 5];
+          for (const slot of order) {
+            assertEqual(game.snapshot().phase, 'idle', 'Phase before reveal');
+            const item = game.reveal();
+            assertEqual(game.snapshot().phase, 'revealed', 'Phase after reveal');
+            assert(pool.includes(item), 'Revealed item comes from the pool');
+            game.place(slot);
+          }
+          const snap = game.snapshot();
+          assertEqual(snap.phase, 'complete', 'Final phase');
+          assertEqual(snap.placed, 10, 'Placed count');
+          assertEqual(new Set(snap.slots.map((i) => i.id)).size, 10, 'Distinct items');
+        });
+
+        test('a game enforces its rules', () => {
+          const { createGame, createRng } = registry.get('core');
+          const pool = registry.get('content').catalog.get('cricket').items;
+          const game = createGame({ items: pool, rng: createRng(3) });
+          assertThrows(() => game.place(0), /Reveal an item first/);
+          game.reveal();
+          assertThrows(() => game.reveal(), /Place the current item first/);
+          assertThrows(() => game.place(10), /Invalid slot/);
+          assertThrows(() => game.place(-1), /Invalid slot/);
+          game.place(0);
+          game.reveal();
+          assertThrows(() => game.place(0), /already filled/);
+          for (let slot = 1; game.snapshot().phase !== 'complete'; slot += 1) {
+            if (game.snapshot().phase === 'idle') {
+              game.reveal();
+            }
+            game.place(slot);
+          }
+          assertThrows(() => game.reveal(), /complete/);
+        });
+
+        test('a game notifies subscribers and snapshots are frozen', () => {
+          const { createGame, createRng } = registry.get('core');
+          const pool = registry.get('content').catalog.get('countries').items;
+          const game = createGame({ items: pool, rng: createRng(5) });
+          let calls = 0;
+          const stop = game.subscribe(() => {
+            calls += 1;
+          });
+          game.reveal();
+          game.place(3);
+          assertEqual(calls, 2, 'Notifications');
+          stop();
+          game.reveal();
+          assertEqual(calls, 2, 'No notification after unsubscribe');
+          assert(Object.isFrozen(game.snapshot()), 'Snapshot frozen');
+          assert(Object.isFrozen(game.snapshot().slots), 'Slots frozen');
+        });
+
+        test('the same seed deals the same picks in the same order', () => {
+          const { createGame, createRng } = registry.get('core');
+          const pool = registry.get('content').catalog.get('football').items;
+          const deal = (seed) => {
+            const game = createGame({ items: pool, rng: createRng(seed) });
+            const ids = [];
+            for (let i = 0; i < 10; i += 1) {
+              ids.push(game.reveal().id);
+              game.place(i);
+            }
+            return ids.join(',');
+          };
+          assertEqual(deal(11), deal(11), 'Same seed');
+          assert(deal(11) !== deal(12), 'Different seeds should differ');
+        });
+
+        // --- results ---
+        test('a result keeps rank order and builds share text', () => {
+          const { buildResult, toShareText } = registry.get('results');
+          const category = registry.get('content').catalog.get('countries');
+          const slots = category.items.slice(0, 10);
+          const result = buildResult({ category, slots, createdAt: new Date('2026-10-30T10:00:00Z') });
+          assertEqual(result.entries.length, 10, 'Entries');
+          assertEqual(result.entries[0].rank, 1, 'First rank');
+          assertEqual(result.entries[9].name, slots[9].name, 'Last name');
+          assertEqual(result.createdAt, '2026-10-30T10:00:00.000Z', 'Timestamp');
+          assert(Object.isFrozen(result), 'Result frozen');
+          const text = toShareText(result, 'Blind Ranking');
+          assert(text.startsWith('Blind Ranking · Countries'), 'Share text header');
+          assert(text.includes('1. Brazil') && text.includes('10. '), 'Share text lines');
+          assertEqual(text.split('\n').length, 12, 'Share text line count');
+        });
+
+        test('a result cannot be built from an unfinished ranking', () => {
+          const { buildResult } = registry.get('results');
+          const category = registry.get('content').catalog.get('football');
+          assertThrows(
+            () => buildResult({ category, slots: [category.items[0], null] }),
+            /unfinished/,
+          );
+          assertThrows(() => buildResult({ category, slots: [] }), /needs a category and slots/);
+        });
+
+        // --- ui ---
+        test('routes parse correctly and unknown ones fall back to home', () => {
+          const { parseRoute } = registry.get('ui');
+          assertEqual(parseRoute('').name, 'home', 'Empty hash');
+          assertEqual(parseRoute('#/').name, 'home', 'Root');
+          assertEqual(parseRoute('#/nonsense').name, 'home', 'Unknown');
+          const play = parseRoute('#/play/football');
+          assertEqual(play.name, 'play', 'Play route');
+          assertEqual(play.categoryId, 'football', 'Play category');
+          assertEqual(parseRoute('#/result').name, 'result', 'Result route');
+          const diag = parseRoute('#/diagnostics');
+          assert(diag.name === 'diagnostics' && !diag.autorunTests, 'Diagnostics route');
+          const legacy = parseRoute('#tests');
+          assert(legacy.name === 'diagnostics' && legacy.autorunTests, '#tests route');
+          assertEqual(parseRoute('#/play/%E0%A4%A').name, 'play', 'Malformed escape does not throw');
+        });
+
+        test('hexToRgba converts colors', () => {
+          assertEqual(
+            registry.get('ui').hexToRgba('#34d399', 0.5),
+            'rgba(52, 211, 153, 0.5)',
+            'Converted color',
+          );
+        });
+
+        test('home shows one card per category and four how-it-works steps', () => {
+          const ui = registry.get('ui');
+          const visited = [];
+          const { element } = ui.previewScreen({ name: 'home' }, { go: (path) => visited.push(path) });
+          const cards = element.querySelectorAll('[data-category]');
+          assertEqual(cards.length, registry.get('content').catalog.categories().length, 'Cards');
+          assertEqual(element.querySelectorAll('[data-how-step]').length, 4, 'Steps');
+          cards[1].click();
+          assertEqual(visited.join(','), '/play/cricket', 'Card navigates to play');
+        });
+
+        test('an unknown category or a missing result previews as home', () => {
+          const ui = registry.get('ui');
+          assert(
+            ui.previewScreen({ name: 'play', categoryId: 'zzz' }).element.dataset.screen === 'home',
+            'Unknown category',
+          );
+          assert(ui.previewScreen({ name: 'result' }).element.dataset.screen === 'home', 'No result');
+        });
+
+        test('a full game can be played through the play screen', () => {
+          const ui = registry.get('ui');
+          const { createRng } = registry.get('core');
+          const session = { result: null };
+          const visited = [];
+          const { element, game, destroy } = ui.previewScreen(
+            { name: 'play', categoryId: 'football' },
+            { session, rng: createRng(21), go: (path) => visited.push(path) },
+          );
+          const primary = element.querySelector('[data-action="primary"]');
+          const slotButtons = Array.from(element.querySelectorAll('[data-slot]'));
+          const progress = element.querySelector('[data-progress]');
+          assertEqual(slotButtons.length, 10, 'Slot buttons');
+          assert(slotButtons.every((b) => b.disabled), 'Slots start disabled');
+          assertEqual(progress.textContent, '0 / 10', 'Initial progress');
+          assertEqual(primary.textContent, 'Reveal first pick', 'Initial action');
+
+          const order = [9, 3, 0, 5, 7, 1, 8, 2, 6, 4];
+          order.forEach((slot, step) => {
+            assert(!primary.disabled, 'Reveal is enabled before each pick');
+            primary.click();
+            const revealed = game.snapshot().current;
+            assertEqual(
+              element.querySelector('[data-stage-name]').textContent,
+              revealed.name,
+              'Stage shows the revealed pick',
+            );
+            assert(primary.disabled, 'Reveal is disabled while a pick is waiting');
+            const free = slotButtons.filter((b) => !b.disabled);
+            assertEqual(free.length, 10 - step, 'Only free slots are enabled');
+            slotButtons[slot].click();
+            assertEqual(slotButtons[slot].querySelector('.slot__name').textContent, revealed.name, 'Slot name');
+            assert(slotButtons[slot].disabled, 'A filled slot is disabled');
+            assertEqual(progress.textContent, `${step + 1} / 10`, 'Progress');
+          });
+
+          assertEqual(primary.textContent, 'See my ranking', 'Final action');
+          primary.click();
+          assertEqual(visited.join(','), '/result', 'Navigates to the result');
+          assert(session.result, 'Result stored in the session');
+          assertEqual(session.result.entries.length, 10, 'Result entries');
+          assertEqual(
+            session.result.entries.map((e) => e.name).join('|'),
+            names(slotButtons.map((b) => ({ name: b.querySelector('.slot__name').textContent }))).join('|'),
+            'Result matches the board',
+          );
+          destroy();
+        });
+
+        test('the result screen lists the ranking and shares it', async () => {
+          const ui = registry.get('ui');
+          const { buildResult } = registry.get('results');
+          const category = registry.get('content').catalog.get('cricket');
+          const result = buildResult({ category, slots: category.items.slice(0, 10) });
+          const shared = [];
+          const visited = [];
+          const { element } = ui.previewScreen(
+            { name: 'result' },
+            {
+              session: { result },
+              go: (path) => visited.push(path),
+              share: async (payload) => {
+                shared.push(payload);
+                return 'copied';
+              },
+            },
+          );
+          const rows = element.querySelectorAll('[data-rank-row]');
+          assertEqual(rows.length, 10, 'Rows');
+          assertEqual(rows[0].querySelector('.rank-row__name').textContent, category.items[0].name, 'First row');
+          element.querySelector('[data-action="share"]').click();
+          await nextTick();
+          assertEqual(shared.length, 1, 'Share calls');
+          assert(shared[0].text.includes(`1. ${category.items[0].name}`), 'Share text');
+          assertEqual(element.querySelector('[data-share-status]').textContent, 'Copied to clipboard.', 'Status');
+          element.querySelector('[data-action="again"]').click();
+          element.querySelector('[data-action="home"]').click();
+          assertEqual(visited.join(','), '/play/cricket,/', 'Result actions navigate');
+        });
+
+        test('diagnostics lists ten module rows and the browser checks', () => {
+          const { element } = registry.get('ui').previewScreen({ name: 'diagnostics' });
+          assertEqual(element.querySelectorAll('[data-module-row]').length, 10, 'Module rows');
+          assert(element.querySelectorAll('[data-env] li').length >= 10, 'Environment rows');
+          assert(element.querySelector('[data-test-output]'), 'Test output area');
+        });
+
+        test('every previewed screen has buttons with accessible names', () => {
+          const ui = registry.get('ui');
+          const { buildResult } = registry.get('results');
+          const category = registry.get('content').catalog.get('football');
+          const result = buildResult({ category, slots: category.items.slice(0, 10) });
+          const screens = [
+            ui.previewScreen({ name: 'home' }),
+            ui.previewScreen({ name: 'play', categoryId: 'football' }),
+            ui.previewScreen({ name: 'result' }, { session: { result } }),
+            ui.previewScreen({ name: 'diagnostics' }),
+          ];
+          for (const { element } of screens) {
+            for (const button of element.querySelectorAll('button')) {
+              const label = button.getAttribute('aria-label') || button.textContent.trim();
+              assert(label.length > 0, `Unnamed button on ${element.dataset.screen}`);
+            }
+          }
+          screens.forEach((screen) => screen.destroy && screen.destroy());
+        });
+
+        // --- camera (automated: a simulated camera, never the real one) ---
+        test('camera constraints ask for the front camera at a budget-friendly size, never audio', () => {
+          const { buildConstraints, PROFILE } = registry.get('camera');
+          const c = buildConstraints();
+          assertEqual(c.audio, false, 'Audio');
+          assertEqual(c.video.facingMode.ideal, 'user', 'Default facing');
+          assertEqual(c.video.width.ideal, 640, 'Width');
+          assertEqual(c.video.height.ideal, 480, 'Height');
+          assert(c.video.frameRate.max <= 30, 'Frame rate cap');
+          const back = buildConstraints({ facing: 'environment', exactFacing: true });
+          assertEqual(back.video.facingMode.exact, 'environment', 'Exact facing');
+          const byId = buildConstraints({ deviceId: 'abc' });
+          assertEqual(byId.video.deviceId.exact, 'abc', 'Device id');
+          assert(!('facingMode' in byId.video), 'A device id replaces the facing mode');
+          assertThrows(() => {
+            PROFILE.width.ideal = 1920;
+          }, /read only|Cannot assign|frozen/i);
+        });
+
+        test('camera errors map to clear, friendly messages', () => {
+          const { classifyError, describeError } = registry.get('camera');
+          const expected = {
+            NotAllowedError: 'denied',
+            PermissionDeniedError: 'denied',
+            SecurityError: 'denied',
+            NotFoundError: 'not-found',
+            DevicesNotFoundError: 'not-found',
+            NotReadableError: 'busy',
+            AbortError: 'busy',
+            OverconstrainedError: 'settings',
+            SomethingNew: 'unknown',
+          };
+          for (const [name, code] of Object.entries(expected)) {
+            const described = classifyError({ name });
+            assertEqual(described.code, code, name);
+            assertEqual(described.detail, name, 'The raw error name is kept for diagnostics');
+            assert(described.title.length > 0 && described.message.length > 10, `${name} text`);
+            assert(!/Error|Exception/.test(described.message), `${name} message must be plain language`);
+          }
+          assertEqual(classifyError(null).code, 'unknown', 'Null error');
+          assertEqual(describeError('nonsense').code, 'unknown', 'Unknown code');
+          assert(describeError('denied').retry, 'A denied camera can be retried');
+          assert(
+            !describeError('insecure').retry && !describeError('unsupported').retry,
+            'Errors the player cannot fix have no retry button',
+          );
+        });
+
+        test('camera support detection reports insecure pages and missing APIs', () => {
+          const { detectSupport } = registry.get('camera');
+          const devices = makeFakeMediaDevices();
+          assertEqual(detectSupport({ mediaDevices: devices, secureContext: true }).supported, true, 'Supported');
+          assertEqual(detectSupport({ mediaDevices: devices, secureContext: false }).code, 'insecure', 'Insecure');
+          assertEqual(detectSupport({ mediaDevices: undefined, secureContext: true }).code, 'unsupported', 'No API');
+          assertEqual(detectSupport({ mediaDevices: {}, secureContext: true }).code, 'unsupported', 'No getUserMedia');
+        });
+
+        test('starting the camera opens one stream and stopping releases every track', async () => {
+          const devices = makeFakeMediaDevices();
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          assertEqual(c.snapshot().state, 'idle', 'Initial state');
+          assertEqual(devices.calls.length, 0, 'No request before start');
+          assertEqual(await c.start(), true, 'Start result');
+          const snap = c.snapshot();
+          assertEqual(snap.state, 'active', 'Active');
+          assertEqual(snap.facing, 'user', 'Front camera first');
+          assertEqual(devices.calls.length, 1, 'One request');
+          assertEqual(devices.calls[0].audio, false, 'No audio');
+          assert(snap.canSwitch && snap.cameraCount === 2, 'Two cameras found');
+          assertEqual(snap.settings.width, 640, 'Settings read from the track');
+          c.stop();
+          assert(streamEnded(devices.streams[0]), 'Every track ended');
+          assertEqual(c.snapshot().state, 'idle', 'Idle after stop');
+          assertEqual(c.snapshot().stream, null, 'Stream cleared');
+        });
+
+        test('a blocked camera gives a friendly error and can be retried', async () => {
+          const devices = makeFakeMediaDevices();
+          devices.failNext('NotAllowedError');
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          assertEqual(await c.start(), false, 'Start result');
+          const snap = c.snapshot();
+          assertEqual(snap.state, 'error', 'Error state');
+          assertEqual(snap.error.code, 'denied', 'Error code');
+          assert(snap.error.retry, 'Retry offered');
+          assertEqual(snap.stream, null, 'No stream');
+          assertEqual(await c.start(), true, 'Retry works once allowed');
+          assertEqual(c.snapshot().error, null, 'Error cleared');
+          c.stop();
+        });
+
+        test('a missing camera and a busy camera are reported clearly', async () => {
+          for (const [name, code] of [
+            ['NotFoundError', 'not-found'],
+            ['NotReadableError', 'busy'],
+          ]) {
+            const devices = makeFakeMediaDevices();
+            devices.failNext(name);
+            const c = registry.get('camera').createController({ mediaDevices: devices });
+            assertEqual(await c.start(), false, name);
+            assertEqual(c.snapshot().error.code, code, name);
+          }
+        });
+
+        test('a device that refuses the size settings falls back to default settings', async () => {
+          const devices = makeFakeMediaDevices();
+          devices.failNext('OverconstrainedError');
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          assertEqual(await c.start(), true, 'Start result');
+          assertEqual(devices.calls.length, 2, 'Two requests');
+          assertEqual(devices.calls[1].video, true, 'Second request uses plain video');
+          c.stop();
+        });
+
+        test('stopping while the camera is still starting does not leak a stream', async () => {
+          const devices = makeFakeMediaDevices({ delay: 40 });
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          const pending = c.start();
+          assertEqual(c.snapshot().state, 'starting', 'Starting');
+          c.stop();
+          assertEqual(await pending, false, 'The late start is cancelled');
+          assertEqual(c.snapshot().state, 'idle', 'Still idle');
+          assertEqual(devices.streams.length, 1, 'The late stream existed');
+          assert(streamEnded(devices.streams[0]), 'and was stopped at once');
+        });
+
+        test('pressing start twice opens the camera only once', async () => {
+          const devices = makeFakeMediaDevices({ delay: 20 });
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          const first = c.start();
+          assertEqual(await c.start(), false, 'The second call is ignored while starting');
+          assertEqual(await first, true, 'The first call succeeds');
+          assertEqual(devices.calls.length, 1, 'One request');
+          c.stop();
+        });
+
+        test('switching cameras releases the old stream first and flips front and back', async () => {
+          const devices = makeFakeMediaDevices();
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          await c.start();
+          let releasedBeforeOpen = null;
+          const open = devices.getUserMedia.bind(devices);
+          devices.getUserMedia = async (constraints) => {
+            releasedBeforeOpen = streamEnded(devices.streams[0]);
+            return open(constraints);
+          };
+          const states = [];
+          c.subscribe((s) => states.push(s.switching ? 'switching' : s.state));
+          assertEqual(await c.switchCamera(), true, 'First switch');
+          assertEqual(releasedBeforeOpen, true, 'The old camera is released before the new one opens');
+          assertEqual(c.snapshot().facing, 'environment', 'Back camera');
+          assertEqual(devices.calls[1].video.facingMode.exact, 'environment', 'Asks for the back camera');
+          assert(states.includes('switching'), 'A switching state is shown');
+          assertEqual(await c.switchCamera(), true, 'Second switch');
+          assertEqual(c.snapshot().facing, 'user', 'Front camera again');
+          c.stop();
+        });
+
+        test('switching falls back to another camera id when facing mode is refused', async () => {
+          const devices = makeFakeMediaDevices();
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          await c.start();
+          devices.failNext('OverconstrainedError');
+          assertEqual(await c.switchCamera(), true, 'Switch result');
+          assertEqual(devices.calls[2].video.deviceId.exact, 'cam-1', 'Opens the other camera by id');
+          assertEqual(c.snapshot().facing, 'environment', 'Back camera');
+          c.stop();
+        });
+
+        test('a failed switch keeps the previous camera running and says so', async () => {
+          const devices = makeFakeMediaDevices();
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          await c.start();
+          devices.failNext('NotAllowedError');
+          assertEqual(await c.switchCamera(), false, 'Switch result');
+          const snap = c.snapshot();
+          assertEqual(snap.state, 'active', 'Still active');
+          assertEqual(snap.facing, 'user', 'Still the front camera');
+          assert(/previous/.test(snap.notice), 'Explains what happened');
+          assert(!streamEnded(snap.stream), 'The restored stream is live');
+          c.stop();
+        });
+
+        test('switching is not offered with a single camera', async () => {
+          const devices = makeFakeMediaDevices({ cameras: 1 });
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          await c.start();
+          assertEqual(c.snapshot().canSwitch, false, 'canSwitch');
+          assertEqual(await c.switchCamera(), false, 'switchCamera');
+          assertEqual(devices.calls.length, 1, 'No extra request');
+          c.stop();
+        });
+
+        test('a camera taken away while running moves to a friendly error state', async () => {
+          const devices = makeFakeMediaDevices();
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          await c.start();
+          devices.streams[0].getVideoTracks()[0].dispatchEvent(new Event('ended'));
+          const snap = c.snapshot();
+          assertEqual(snap.state, 'error', 'Error state');
+          assertEqual(snap.error.code, 'ended', 'Error code');
+          assertEqual(snap.stream, null, 'Stream released');
+          assert(streamEnded(devices.streams[0]), 'Tracks stopped');
+        });
+
+        test('dispose stops the camera and silences listeners', async () => {
+          const devices = makeFakeMediaDevices();
+          const c = registry.get('camera').createController({ mediaDevices: devices });
+          await c.start();
+          let notified = 0;
+          c.subscribe(() => {
+            notified += 1;
+          });
+          c.dispose();
+          assert(streamEnded(devices.streams[0]), 'Tracks stopped');
+          assertEqual(notified, 0, 'No notifications after dispose');
+        });
+
+        test('frame rate measurement copes with a missing API and a working one', async () => {
+          const { measureFrameRate } = registry.get('camera');
+          assertEqual(await measureFrameRate({}, 20), null, 'No requestVideoFrameCallback');
+          const fake = {
+            requestVideoFrameCallback(callback) {
+              setTimeout(() => callback(performance.now()), 10);
+            },
+          };
+          const fps = await measureFrameRate(fake, 100);
+          assert(Number.isFinite(fps) && fps > 5, `Unexpected frame rate ${fps}`);
+        });
+
+        const playRoute = { name: 'play', categoryId: 'football' };
+
+        test('the play screen offers the camera but never opens it by itself', () => {
+          const devices = makeFakeMediaDevices();
+          const { element, destroy } = registry.get('ui').previewScreen(playRoute, { mediaDevices: devices });
+          assertEqual(devices.calls.length, 0, 'No camera request on load');
+          assert(element.querySelector('[data-action="camera-start"]'), 'Start camera button');
+          assert(!element.querySelector('video'), 'No video before the camera starts');
+          const note = element.querySelector('[data-camera-note]').textContent;
+          assert(/never uploaded/i.test(note), 'The privacy note says nothing is uploaded');
+          destroy();
+        });
+
+        test('Start camera shows a live preview and Stop releases it', async () => {
+          const devices = makeFakeMediaDevices();
+          const { element, destroy } = registry.get('ui').previewScreen(playRoute, { mediaDevices: devices });
+          element.querySelector('[data-action="camera-start"]').click();
+          await waitFor(() => element.querySelector('video'), 'the live preview');
+          const video = element.querySelector('video');
+          assert(video.srcObject === devices.streams[0], 'The preview shows the camera stream');
+          assert(video.muted && video.hasAttribute('playsinline'), 'Mobile-safe video attributes');
+          assert(!element.querySelector('[data-camera-live]').hidden, 'Live chip shown');
+          assert(element.querySelector('[data-action="camera-switch"]'), 'Switch button with two cameras');
+          assert(!element.querySelector('[data-action="camera-start"]'), 'Start button hidden while on');
+          element.querySelector('[data-action="camera-stop"]').click();
+          assert(streamEnded(devices.streams[0]), 'Stop releases the camera');
+          assert(!element.querySelector('video'), 'Preview removed');
+          assert(element.querySelector('[data-action="camera-start"]'), 'Start button is back');
+          assert(element.querySelector('[data-camera-live]').hidden, 'Live chip hidden');
+          destroy();
+        });
+
+        test('only the front camera preview is mirrored', async () => {
+          const devices = makeFakeMediaDevices();
+          const { element, destroy } = registry.get('ui').previewScreen(playRoute, { mediaDevices: devices });
+          element.querySelector('[data-action="camera-start"]').click();
+          await waitFor(() => element.querySelector('video'), 'the live preview');
+          const video = element.querySelector('video');
+          assert(video.classList.contains('stage__video--mirror'), 'Front camera is mirrored');
+          element.querySelector('[data-action="camera-switch"]').click();
+          await waitFor(
+            () => element.querySelector('video') && !video.classList.contains('stage__video--mirror'),
+            'the back camera preview',
+          );
+          element.querySelector('[data-action="camera-switch"]').click();
+          await waitFor(
+            () => element.querySelector('video') && video.classList.contains('stage__video--mirror'),
+            'the front camera preview again',
+          );
+          destroy();
+        });
+
+        test('a blocked camera shows a friendly message and the game still works', async () => {
+          const devices = makeFakeMediaDevices();
+          devices.failNext('NotAllowedError');
+          const { element, game, destroy } = registry
+            .get('ui')
+            .previewScreen(playRoute, { mediaDevices: devices });
+          element.querySelector('[data-action="camera-start"]').click();
+          await waitFor(() => element.querySelector('[data-camera-panel="error"]'), 'the error panel');
+          const panel = element.querySelector('[data-camera-panel="error"]');
+          assert(/Camera not allowed/.test(panel.textContent), 'Plain-language title');
+          assert(
+            /lock icon/.test(element.querySelector('[data-camera-note]').textContent),
+            'The note says how to allow the camera',
+          );
+          assert(!/NotAllowedError/.test(element.textContent), 'No technical error name on screen');
+          assert(element.querySelector('[data-action="camera-retry"]'), 'Try again button');
+          element.querySelector('[data-action="primary"]').click();
+          element.querySelector('[data-slot="4"]').click();
+          assertEqual(game.snapshot().placed, 1, 'The game works without the camera');
+          element.querySelector('[data-action="camera-retry"]').click();
+          await waitFor(() => element.querySelector('video'), 'the preview after retrying');
+          destroy();
+        });
+
+        test('an unsupported or insecure browser shows a clear message without a Start button', () => {
+          const ui = registry.get('ui');
+          const cases = [
+            [{ mediaDevices: null }, /cannot open the camera/],
+            [{ mediaDevices: makeFakeMediaDevices(), secureContext: false }, /https/],
+          ];
+          for (const [overrides, pattern] of cases) {
+            const { element, destroy } = ui.previewScreen(playRoute, overrides);
+            const panel = element.querySelector('[data-camera-panel="error"]');
+            const note = element.querySelector('[data-camera-note]');
+            assert(panel, 'Error panel');
+            assert(!note.hidden && pattern.test(note.textContent), `Message for ${JSON.stringify(Object.keys(overrides))}`);
+            assert(!element.querySelector('[data-action="camera-start"]'), 'No Start button');
+            assert(!element.querySelector('[data-action="camera-retry"]'), 'No Try again button');
+            destroy();
+          }
+        });
+
+        test('leaving the play screen releases the camera', async () => {
+          const devices = makeFakeMediaDevices();
+          const { element, destroy } = registry.get('ui').previewScreen(playRoute, { mediaDevices: devices });
+          element.querySelector('[data-action="camera-start"]').click();
+          await waitFor(() => element.querySelector('video'), 'the live preview');
+          const video = element.querySelector('video');
+          destroy();
+          assert(streamEnded(devices.streams[0]), 'Camera released');
+          assert(!video.srcObject, 'Preview detached');
+        });
+
+        test('sending the app to the background turns the camera off', async () => {
+          const devices = makeFakeMediaDevices();
+          const { element, destroy } = registry.get('ui').previewScreen(playRoute, { mediaDevices: devices });
+          element.querySelector('[data-action="camera-start"]').click();
+          await waitFor(() => element.querySelector('video'), 'the live preview');
+          Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+          try {
+            document.dispatchEvent(new Event('visibilitychange'));
+          } finally {
+            delete document.visibilityState;
+          }
+          assert(streamEnded(devices.streams[0]), 'Camera released');
+          assert(/background/.test(element.querySelector('[data-camera-note]').textContent), 'Explains why');
+          destroy();
+        });
+
+        test('diagnostics keeps the automated tests and the real camera check apart', () => {
+          const { element, destroy } = registry.get('ui').previewScreen({ name: 'diagnostics' });
+          const headings = Array.from(element.querySelectorAll('h3')).map((node) => node.textContent);
+          assert(headings.includes('Automated self-tests'), 'Automated tests heading');
+          assert(headings.includes('Real camera check (manual)'), 'Manual check heading');
+          assert(
+            /do not test your real camera/.test(element.textContent),
+            'The automated tests say they do not use the real camera',
+          );
+          destroy();
+        });
+
+        test('the manual camera check reports measurements and proves the camera is released', async () => {
+          const devices = makeFakeMediaDevices();
+          const { element, destroy } = registry
+            .get('ui')
+            .previewScreen({ name: 'diagnostics' }, { mediaDevices: devices, fpsWindowMs: 40 });
+          const card = element.querySelector('[data-camera-check]');
+          const button = card.querySelector('[data-action="camera-check"]');
+          button.click();
+          assert(button.disabled, 'The button is disabled while the check runs');
+          await waitFor(() => !button.disabled, 'the camera check to finish', 12000);
+          const rows = card.querySelector('[data-camera-check-results]').textContent;
+          for (const label of [
+            'Camera opened in',
+            'First video frame',
+            'Picture size',
+            'Cameras found',
+            'Camera released afterwards',
+          ]) {
+            assert(rows.includes(label), `Missing row: ${label}`);
+          }
+          assertEqual(devices.streams.length, 1, 'One stream');
+          assert(streamEnded(devices.streams[0]), 'The camera is released');
+          destroy();
+        });
+
+        test('the manual camera check explains a blocked camera', async () => {
+          const devices = makeFakeMediaDevices();
+          devices.failNext('NotAllowedError');
+          const { element, destroy } = registry
+            .get('ui')
+            .previewScreen({ name: 'diagnostics' }, { mediaDevices: devices });
+          const card = element.querySelector('[data-camera-check]');
+          const button = card.querySelector('[data-action="camera-check"]');
+          button.click();
+          await waitFor(() => !button.disabled, 'the camera check to finish', 4000);
+          const rows = card.querySelector('[data-camera-check-results]').textContent;
+          assert(/Camera not allowed/.test(rows), 'Friendly result');
+          assert(/NotAllowedError/.test(rows), 'The raw browser error is listed for diagnostics');
+          assertEqual(devices.streams.length, 0, 'No stream was opened');
+          destroy();
+        });
+
+        // --- page ---
+        test('the page is self-contained (no external resources)', () => {
+          const external = document.querySelectorAll(
+            'script[src], link[rel~="stylesheet"], link[href]:not([href^="data:"]), ' +
+              'img[src]:not([src^="data:"]), iframe, video[src], audio[src], source[src]',
+          );
+          assertEqual(external.length, 0, 'External resource count');
+        });
+
+        test('the page declares a responsive viewport and a content security policy', () => {
+          const viewport = document.querySelector('meta[name="viewport"]');
+          assert(viewport && /width=device-width/.test(viewport.content), 'Viewport meta');
+          assert(
+            document.querySelector('meta[http-equiv="Content-Security-Policy"]'),
+            'CSP meta missing',
+          );
+        });
+
+        test('the shell keeps its landmarks and the version footer on every screen', () => {
+          assert(document.querySelector('header h1'), 'Header title');
+          assert(document.querySelector('main#main'), 'Main landmark');
+          const footer = document.querySelector('[data-footer]');
+          const { config } = registry.get('shared');
+          assert(footer && footer.textContent.includes(config.app.version), 'Footer version');
+        });
+
+        test('every button on the live page has an accessible name', () => {
+          for (const button of document.querySelectorAll('button')) {
+            const label = button.getAttribute('aria-label') || button.textContent.trim();
+            assert(label.length > 0, 'Button without a name');
+          }
+        });
+
+        /**
+         * Runs every test and stores the summary on window.__BR_TESTS__.
+         * @returns {Promise<{total: number, passed: number, failed: number, results: any[]}>}
+         */
+        async function runTests() {
+          const results = [];
+          for (const { name, run } of TESTS) {
+            try {
+              await run();
+              results.push({ name, ok: true });
+            } catch (error) {
+              results.push({ name, ok: false, error: String((error && error.message) || error) });
+            }
+          }
+          const failed = results.filter((r) => !r.ok).length;
+          const summary = { total: results.length, passed: results.length - failed, failed, results };
+          window.__BR_TESTS__ = summary;
+          return summary;
+        }
+
+        /* ===== END TESTS ===== */
+
+        /* ===== BOOTSTRAP (becomes src/main.js) ===== */
+
+        /**
+         * Shows a startup failure in the page instead of leaving it blank.
+         * @param {HTMLElement} root
+         * @param {unknown} error
+         */
+        function renderFatal(root, error) {
+          const box = document.createElement('div');
+          box.className = 'fatal';
+          const title = document.createElement('h2');
+          title.textContent = 'The app could not start';
+          const detail = document.createElement('pre');
+          detail.textContent = String((error && error.message) || error);
+          box.append(title, detail);
+          root.replaceChildren(box);
+          window.__BR_FATAL__ = detail.textContent;
+        }
+
+        function start() {
+          const root = document.getElementById('app');
+          if (!root) {
+            return;
+          }
+          try {
+            registry.boot();
+            registry.get('ui').mount(root, { runTests });
+          } catch (error) {
+            renderFatal(root, error);
+          }
+        }
+
+        // Small debug handle for the browser console. Not used by the app itself.
+        window.BR = Object.freeze({
+          get: registry.get,
+          list: registry.list,
+          runTests,
+          version: registry.get('shared').config.app.version,
+        });
+
+        start();
+        /* ===== END BOOTSTRAP ===== */
+      })();
+    </script>
+  </body>
+</html>
